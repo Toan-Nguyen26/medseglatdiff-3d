@@ -1,0 +1,30 @@
+# ── Dataset (never commit — too large) ──────────────────────────────────────
+data
+*.nii.gz
+*.npy
+*.npz
+medseglatdiff-3d/
+
+# ── Model weights & training outputs ────────────────────────────────────────
+checkpoints/
+runs/
+logs/runs/
+
+# Keep the master experiments index even though logs/runs/ is ignored
+!logs/EXPERIMENTS.md
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+.conda/
+
+# ── Editor / OS ──────────────────────────────────────────────────────────────
+.vscode/
+.DS_Store
+.claude/
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+wandb/
