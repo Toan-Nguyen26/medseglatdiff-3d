@@ -1,5 +1,30 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple
+
+
+@dataclass
+class PixelDiffusionConfig:
+    """
+    Config for pixel-space diffusion (no VAE, no encoder).
+    Input to UNet = cat(image, noisy_mask) — image_channels + mask_channels.
+    Output = predicted noise for mask channels only.
+    """
+    image_channels: int = 4
+    mask_channels: int = 3
+
+    base_channels: int = 32
+    channel_multipliers: Tuple[int, ...] = (1, 2, 4)
+    num_res_blocks_per_level: int = 2
+    group_norm_groups: int = 8
+    time_emb_dim: int = 256
+
+    num_timesteps: int = 1000
+    beta_start: float = 1e-4
+    beta_end: float = 2e-2
+
+    @property
+    def in_channels(self) -> int:
+        return self.image_channels + self.mask_channels
 
 
 @dataclass

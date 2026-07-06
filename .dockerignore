@@ -1,0 +1,13 @@
+data/
+checkpoints/
+splits/
+logs/
+runs/
+eval_output/
+__pycache__/
+**/__pycache__/
+*.pyc
+.conda/
+.git/
+*.tar
+*.tar.gz

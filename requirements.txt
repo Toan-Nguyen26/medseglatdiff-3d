@@ -1,9 +1,13 @@
-torch
-numpy
-nibabel
+torch>=2.3.0
+torchvision
+numpy>=1.24
+nibabel>=5.0
 einops
 timm
 pyyaml
 matplotlib
 monai>=1.3
 tqdm
+scikit-image
+kaggle
+gdown

@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from models.diffusion.blocks import TimestepResBlock3D
-from models.diffusion.config import DiffusionConfig
+from models.diffusion.config import DiffusionConfig, PixelDiffusionConfig
 from models.diffusion.time_embedding import TimeEmbedding
 from models.mask_vae.blocks import Downsample3D, Upsample3D
 
@@ -98,7 +98,7 @@ class UNet3D(nn.Module):
         nn.init.zeros_(self.conv_out.weight)
         nn.init.zeros_(self.conv_out.bias)
 
-    def forward(self, z_t: torch.Tensor, t: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+    def forward(self, z_t: torch.Tensor, t: torch.Tensor, condition: torch.Tensor = None) -> torch.Tensor:
         """
         Args:
             z_t: noisy mask latent, (B, latent_channels, *spatial)
@@ -136,3 +136,101 @@ class UNet3D(nn.Module):
 
         x = self.act_out(self.norm_out(x))
         return self.conv_out(x)
+
+
+class PixelUNet3D(nn.Module):
+    """
+    Pixel-space noise predictor for concat-conditioned diffusion.
+
+    Input  = cat(volume_masked, noisy_mask)  — (B, image_ch+mask_ch, 96, 96, 96)
+    Output = predicted noise for mask only   — (B, mask_ch, 96, 96, 96)
+
+    No separate conditioning tensor — the image is baked into the input.
+    Timestep conditioning via additive embedding inside every ResBlock.
+    """
+
+    def __init__(self, config: PixelDiffusionConfig) -> None:
+        super().__init__()
+        self.config = config
+
+        self.time_embedding = TimeEmbedding(config.time_emb_dim)
+
+        channels = [config.base_channels * m for m in config.channel_multipliers]
+        self.conv_in = nn.Conv3d(config.in_channels, channels[0], kernel_size=3, padding=1)
+
+        # --- down path ---
+        down_blocks: list[nn.ModuleList] = []
+        downsamples: list[nn.Module] = []
+        cur_ch = channels[0]
+        for level_idx, out_ch in enumerate(channels):
+            blocks = nn.ModuleList([
+                TimestepResBlock3D(
+                    cur_ch if i == 0 else out_ch, out_ch,
+                    config.time_emb_dim, groups=config.group_norm_groups,
+                )
+                for i in range(config.num_res_blocks_per_level)
+            ])
+            down_blocks.append(blocks)
+            cur_ch = out_ch
+            is_last = level_idx == len(channels) - 1
+            downsamples.append(Downsample3D(cur_ch) if not is_last else nn.Identity())
+        self.down_blocks = nn.ModuleList(down_blocks)
+        self.downsamples = nn.ModuleList(downsamples)
+
+        # --- bottleneck ---
+        self.bottleneck = nn.ModuleList([
+            TimestepResBlock3D(cur_ch, cur_ch, config.time_emb_dim, groups=config.group_norm_groups)
+            for _ in range(2)
+        ])
+
+        # --- up path ---
+        reversed_channels = list(reversed(channels))
+        up_blocks: list[nn.ModuleList] = []
+        upsamples: list[nn.Module] = []
+        for level_idx, out_ch in enumerate(reversed_channels):
+            blocks = nn.ModuleList([
+                TimestepResBlock3D(
+                    cur_ch + out_ch if i == 0 else out_ch, out_ch,
+                    config.time_emb_dim, groups=config.group_norm_groups,
+                )
+                for i in range(config.num_res_blocks_per_level)
+            ])
+            up_blocks.append(blocks)
+            cur_ch = out_ch
+            is_last = level_idx == len(reversed_channels) - 1
+            upsamples.append(Upsample3D(cur_ch) if not is_last else nn.Identity())
+        self.up_blocks = nn.ModuleList(up_blocks)
+        self.upsamples = nn.ModuleList(upsamples)
+
+        self.norm_out = nn.GroupNorm(min(config.group_norm_groups, cur_ch), cur_ch)
+        self.act_out  = nn.SiLU()
+        self.conv_out = nn.Conv3d(cur_ch, config.mask_channels, kernel_size=3, padding=1)
+        nn.init.zeros_(self.conv_out.weight)
+        nn.init.zeros_(self.conv_out.bias)
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        x: cat(volume_masked, noisy_mask), (B, image_ch+mask_ch, D, H, W)
+        t: timestep indices, (B,)
+        Returns predicted noise, (B, mask_ch, D, H, W)
+        """
+        time_emb = self.time_embedding(t)
+        x = self.conv_in(x)
+
+        skips: list[torch.Tensor] = []
+        for blocks, downsample in zip(self.down_blocks, self.downsamples):
+            for block in blocks:
+                x = block(x, time_emb)
+            skips.append(x)
+            x = downsample(x)
+
+        for block in self.bottleneck:
+            x = block(x, time_emb)
+
+        for blocks, upsample in zip(self.up_blocks, self.upsamples):
+            x = torch.cat([x, skips.pop()], dim=1)
+            for block in blocks:
+                x = block(x, time_emb)
+            x = upsample(x)
+
+        return self.conv_out(self.act_out(self.norm_out(x)))
