@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from monai.networks.nets import DiffusionModelUNet
@@ -44,12 +44,15 @@ LABEL_COLOURS = {0: (0, 0, 0), 1: (0, 0, 200), 2: (0, 200, 0), 3: (200, 0, 0)}
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data_root", required=True,
-                   help="Output of preprocess_brats.py (contains seg/, vol/, train.txt)")
+                   help="Processed data folder containing vol/ and seg/. Never modified.")
+    p.add_argument("--splits_dir", type=str, default=None,
+                   help="Folder with train.txt/val.txt/test.txt (from resplit_data.py). "
+                        "Defaults to --data_root if not set.")
     p.add_argument("--output_dir", default="runs/uncond_diffusion")
 
     # Data
-    p.add_argument("--subset_frac", type=float, default=0.1,
-                   help="Fraction of training cases to use (0.1 = 10%%)")
+    p.add_argument("--split_file", type=str, default="train.txt")
+    p.add_argument("--val_split_file", type=str, default="val.txt")
     p.add_argument("--crop_size", type=int, default=64,
                    help="3D crop size in voxels (64 is faster than 96 for sanity check)")
 
@@ -255,19 +258,19 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     vis_dir.mkdir(exist_ok=True)
 
+    splits_dir = args.splits_dir if args.splits_dir is not None else args.data_root
+
     # ---- Dataset (seg only; ignore volume for unconditional training) ----
     import os
-    full_dataset = BraTSDataset(
+    train_dataset = BraTSDataset(
         root=args.data_root,
-        split_file=os.path.join(args.data_root, "train.txt"),
+        split_file=os.path.join(splits_dir, args.split_file),
         crop_size=args.crop_size,
     )
-    n_subset = max(1, int(len(full_dataset) * args.subset_frac))
-    train_dataset = Subset(full_dataset, list(range(n_subset)))
 
     val_dataset = BraTSDataset(
         root=args.data_root,
-        split_file=os.path.join(args.data_root, "val.txt"),
+        split_file=os.path.join(splits_dir, args.val_split_file),
         crop_size=args.crop_size,
         random_crop=False,  # centre crop for consistent visualisation
     )
@@ -280,8 +283,7 @@ def main() -> None:
         drop_last=True,
     )
 
-    print(f"Training cases : {n_subset} / {len(full_dataset)} "
-          f"({args.subset_frac*100:.0f}%% subset)")
+    print(f"Training cases  : {len(train_dataset)}")
     print(f"Validation cases: {len(val_dataset)}")
     print(f"Crop size       : {args.crop_size}³")
     print(f"Device          : {device}")

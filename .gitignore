@@ -1,17 +1,19 @@
 # ── Dataset (never commit — too large) ──────────────────────────────────────
-data
+# data/brats_dataset.py and data/__init__.py are source — keep them tracked
+data/raw/
+data/brats_roi128*/
+data/brats_latents*/
+data/brats2023*/
+data/brats2024*/
+data/ASNR-*/
+data/BRATS_*/
 *.nii.gz
 *.npy
 *.npz
-medseglatdiff-3d/
 
 # ── Model weights & training outputs ────────────────────────────────────────
 checkpoints/
-runs/
-logs/runs/
-
-# Keep the master experiments index even though logs/runs/ is ignored
-!logs/EXPERIMENTS.md
+logs/runs/       # per-run CSVs, vis PNGs — large; logs/EXPERIMENTS.md is tracked
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
@@ -28,9 +30,12 @@ __pycache__/
 
 # ── Misc ─────────────────────────────────────────────────────────────────────
 wandb/
-logs/
 splits/
 eval_output/
+eval_out/
+runs/
+Dockerfile
+results_*.zip
 *.tar
 *.tar.gz
 *.pth

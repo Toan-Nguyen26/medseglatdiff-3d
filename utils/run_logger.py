@@ -89,6 +89,7 @@ class RunLogger:
         self._experiments_index = logs_root / "EXPERIMENTS.md"
 
         self._metrics_header_written = self._metrics_path.exists()
+        self._csv_headers: dict[str, bool] = {}  # tracks header-written state per named CSV
 
         if config is not None:
             self._dump_config(config)
@@ -104,12 +105,18 @@ class RunLogger:
         except ImportError:
             self._config_path.with_suffix(".json").write_text(json.dumps(config, indent=2))
 
-    def log_metrics(self, step: int, **metrics: float) -> None:
-        is_new = not self._metrics_header_written
-        with self._metrics_path.open("a") as f:
+    def log_metrics(self, step: int, *, csv: str = "metrics", **metrics: float) -> None:
+        """Write a row to <csv>.csv under the run directory.
+
+        Use different `csv` names to keep metric groups in separate files
+        (e.g. csv="train" vs csv="val") so column headers never collide.
+        """
+        path = self.run_dir / f"{csv}.csv"
+        is_new = not self._csv_headers.get(csv, path.exists())
+        with path.open("a") as f:
             if is_new:
                 f.write("timestamp,step," + ",".join(metrics.keys()) + "\n")
-                self._metrics_header_written = True
+                self._csv_headers[csv] = True
             row = [str(time.time()), str(step)] + [str(v) for v in metrics.values()]
             f.write(",".join(row) + "\n")
 

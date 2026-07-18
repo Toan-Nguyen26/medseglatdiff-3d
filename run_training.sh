@@ -25,6 +25,7 @@ NUM_TIMESTEPS=1000
 NUM_INFERENCE_STEPS=10   # fast val checks during training; use 50 at eval
 VAL_EVERY=500
 LOG_EVERY=100
+NUM_WORKERS=8
 
 echo "============================================================"
 echo " BraTS pixel-space diffusion — full pipeline"
@@ -37,25 +38,15 @@ echo "============================================================"
 # Step 0 — Download raw data (skip if already present via volume mount)
 # ---------------------------------------------------------------------------
 
-# ---- Fill these in after uploading to Google Drive ----
-# Share the file → "Anyone with the link" → copy the ID from the URL
-# https://drive.google.com/file/d/FILE_ID_HERE/view
-GDRIVE_ID_2023="13IeLCD3OGea3HBr-cw78MLAJeR2HTClW"   # e.g. "1aBcDeFgHiJkLmNoPqRsTuV"
-GDRIVE_ID_2024="1Qf98wtbYxGyH00LAZGr2AsO_KCJhC87h"   # e.g. "2xYzAbCdEfGhIjKlMnOpQrS"
+HF_2023="https://huggingface.co/tom-ngh/brats-data/resolve/main/brats2023.tar"
+HF_2024="https://huggingface.co/tom-ngh/brats-data/resolve/main/brats2024.tar"
 
 mkdir -p "$DATA_RAW"
 
 if [ ! -d "$DATA_RAW/brats2023" ]; then
     echo ""
-    echo "[0/4] Downloading BraTS 2023 from Google Drive..."
-    if [ -z "$GDRIVE_ID_2023" ]; then
-        echo "  ERROR: GDRIVE_ID_2023 is not set."
-        echo "  Upload brats2023.tar.gz to Google Drive, then either:"
-        echo "    - Set it in this script: GDRIVE_ID_2023=\"your_file_id\""
-        echo "    - Or pass it at runtime: docker run -e GDRIVE_ID_2023=your_id ..."
-        exit 1
-    fi
-    gdown "$GDRIVE_ID_2023" -O "$DATA_RAW/brats2023.tar" --fuzzy
+    echo "[0/4] Downloading BraTS 2023 from HuggingFace..."
+    wget -q --show-progress "$HF_2023" -O "$DATA_RAW/brats2023.tar"
     echo "  Extracting..."
     mkdir -p "$DATA_RAW/brats2023"
     tar -xf "$DATA_RAW/brats2023.tar" -C "$DATA_RAW/brats2023" --strip-components=1
@@ -64,12 +55,8 @@ fi
 
 if [ ! -d "$DATA_RAW/brats2024" ]; then
     echo ""
-    echo "[0/4] Downloading BraTS 2024 from Google Drive..."
-    if [ -z "$GDRIVE_ID_2024" ]; then
-        echo "  ERROR: GDRIVE_ID_2024 is not set."
-        exit 1
-    fi
-    gdown "$GDRIVE_ID_2024" -O "$DATA_RAW/brats2024.tar" --fuzzy
+    echo "[0/4] Downloading BraTS 2024 from HuggingFace..."
+    wget -q --show-progress "$HF_2024" -O "$DATA_RAW/brats2024.tar"
     echo "  Extracting..."
     mkdir -p "$DATA_RAW/brats2024"
     tar -xf "$DATA_RAW/brats2024.tar" -C "$DATA_RAW/brats2024" --strip-components=1
@@ -140,7 +127,8 @@ python3 -m training.train_diffusion \
     --val_every      "$VAL_EVERY" \
     --log_every      "$LOG_EVERY" \
     --roi_crop_ratio 0.7 \
-    --roi_max_offset 20
+    --roi_max_offset 20 \
+    --num_workers    "$NUM_WORKERS"
 
 # ---------------------------------------------------------------------------
 # Step 4 — Evaluate on all 15 modality combos

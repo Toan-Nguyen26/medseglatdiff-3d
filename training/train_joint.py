@@ -1,23 +1,28 @@
 """
-Joint training: 4 CNN modality encoders + diffusion U-Net, mask VAE frozen.
+Joint training: MONAI image encoder + diffusion U-Net, mask VAE frozen.
 
-This is the simplified two-stage pipeline (replacing the original four-stage
-Uni-Encoder pipeline):
+Pipeline (two stages total):
 
     Stage 1: train_mask_vae.py      (mask VAE, independent)
-    Stage 2: train_joint.py  <-     (encoders + U-Net jointly, mask VAE frozen)
+    Stage 2: train_joint.py  <--    (image encoder + U-Net jointly, mask VAE frozen)
 
-The 4 CNN encoders and the diffusion U-Net train together from scratch.
-There is no separate encoder pretraining step — the diffusion loss
-backpropagates through both the U-Net and the encoders, shaping the
-conditioning representations to be useful for denoising.
+The MONAI AutoEncoder encoder and the diffusion U-Net train together from
+scratch via a combined loss:
 
-Missing-modality robustness comes from sample_modality_mask(): every training
-step randomly draws one of the 15 non-empty modality combinations, so the
-encoders learn to produce useful features from any available subset.
+    total = diffusion_loss + recon_weight * reconstruction_loss
+
+diffusion_loss: standard DDPM MSE on the mask latent.
+reconstruction_loss: L1 between decoded image and masked input, giving the
+    encoder a direct image-level supervision signal without a separate
+    pretraining stage. The decoder is discarded at inference.
+
+Missing-modality robustness: every training step randomly draws one of the 15
+non-empty modality combinations via sample_modality_mask(), so the encoder
+learns to produce useful conditioning from any available modality subset.
 
 Run from repo root:
-    python3 -m training.train_joint --data_root /path/to/brats \
+    python3 -m training.train_joint \\
+        --data_root /path/to/brats_processed \\
         --mask_vae_checkpoint checkpoints/mask_vae/final.pth
 """
 
@@ -26,6 +31,7 @@ import os
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from data.brats_dataset import BraTSDataset, apply_modality_mask, sample_modality_mask
@@ -34,7 +40,7 @@ from models.diffusion.schedule import GaussianDiffusionSchedule, diffusion_loss
 from models.diffusion.unet3d import UNet3D
 from models.mask_vae.config import MaskVAEConfig
 from models.mask_vae.vae import MaskVAE3D
-from models.multiencoder.encoders import MultiModalEncoder
+from models.multiencoder.encoders import ImageEncoder, reconstruction_loss
 from utils.run_logger import RunLogger, new_run_id, set_seed
 
 STAGE = "joint"
@@ -55,15 +61,21 @@ def parse_args() -> argparse.Namespace:
                         help="Must match Stage 1 mask VAE training value")
     parser.add_argument("--latent_channels", type=int, default=8)
 
-    # Multi-modal encoder
+    # Image encoder
     parser.add_argument("--encoder_embed_dim", type=int, default=256,
-                        help="Output channels per encoder; also the diffusion condition_channels")
-    parser.add_argument("--encoder_base_channels", type=int, default=32)
+                        help="Bottleneck channels; also the diffusion condition_channels")
+    parser.add_argument("--encoder_num_res_units", type=int, default=2)
 
     # Diffusion U-Net
     parser.add_argument("--cond_proj_channels", type=int, default=64)
     parser.add_argument("--unet_base_channels", type=int, default=64)
     parser.add_argument("--num_timesteps", type=int, default=1000)
+
+    # Loss
+    parser.add_argument("--recon_weight", type=float, default=0.05,
+                        help="Weight for the auxiliary image reconstruction loss. "
+                             "Diffusion loss dominates; this just gives the encoder "
+                             "a direct image-level signal.")
 
     # Optimiser
     parser.add_argument("--batch_size", type=int, default=2)
@@ -86,7 +98,7 @@ def parse_args() -> argparse.Namespace:
 
 def build_models(
     args: argparse.Namespace, device: torch.device
-) -> tuple[MaskVAE3D, MultiModalEncoder, UNet3D, GaussianDiffusionSchedule]:
+) -> tuple[MaskVAE3D, ImageEncoder, UNet3D, GaussianDiffusionSchedule]:
     # --- Mask VAE (frozen) ---
     mask_vae_config = MaskVAEConfig(
         num_classes=args.num_classes,
@@ -101,20 +113,21 @@ def build_models(
     for p in mask_vae.parameters():
         p.requires_grad = False
 
-    # --- 4 CNN encoders (trained jointly) ---
-    multi_encoder = MultiModalEncoder(
+    # --- MONAI image encoder (trained jointly) ---
+    image_encoder = ImageEncoder(
+        in_channels=4,
         embed_dim=args.encoder_embed_dim,
-        base_channels=args.encoder_base_channels,
+        num_res_units=args.encoder_num_res_units,
     ).to(device)
 
-    # Spatial alignment check: encoder output grid must match mask VAE latent grid
-    encoder_spatial = multi_encoder.output_spatial_shape(args.crop_size)
+    # Spatial alignment: encoder bottleneck must match mask VAE latent grid
+    encoder_spatial = image_encoder.output_spatial_shape(args.crop_size)
     vae_spatial = mask_vae_config.latent_spatial_shape
     if encoder_spatial != vae_spatial:
         raise ValueError(
             f"Spatial mismatch: encoder output {encoder_spatial} != "
             f"mask VAE latent {vae_spatial}. "
-            f"encoder downsample={multi_encoder.SPATIAL_DOWNSAMPLE_FACTOR}x, "
+            f"encoder downsample={image_encoder.SPATIAL_DOWNSAMPLE_FACTOR}x, "
             f"VAE downsample={mask_vae_config.downsample_factor}x — they must match."
         )
 
@@ -133,7 +146,7 @@ def build_models(
         diffusion_config.beta_end,
     ).to(device)
 
-    return mask_vae, multi_encoder, unet, schedule
+    return mask_vae, image_encoder, unet, schedule
 
 
 def main() -> None:
@@ -141,11 +154,11 @@ def main() -> None:
     set_seed(args.seed)
     device = torch.device(args.device)
 
-    mask_vae, multi_encoder, unet, schedule = build_models(args, device)
+    mask_vae, image_encoder, unet, schedule = build_models(args, device)
 
-    # Both encoders and U-Net are trainable
+    # Encoder (both encode and decode paths) + U-Net are trainable
     optimizer = torch.optim.AdamW(
-        list(multi_encoder.parameters()) + list(unet.parameters()),
+        list(image_encoder.parameters()) + list(unet.parameters()),
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
@@ -153,7 +166,7 @@ def main() -> None:
     start_step = 0
     if args.resume is not None:
         ckpt = torch.load(args.resume, map_location=device, weights_only=True)
-        multi_encoder.load_state_dict(ckpt["encoder_state_dict"])
+        image_encoder.load_state_dict(ckpt["encoder_state_dict"])
         unet.load_state_dict(ckpt["unet_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_step = ckpt["step"]
@@ -181,7 +194,7 @@ def main() -> None:
     checkpoint_dir = Path(args.checkpoint_dir) / run_id
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    multi_encoder.train()
+    image_encoder.train()
     unet.train()
     step = start_step
     data_iter = iter(loader)
@@ -198,31 +211,47 @@ def main() -> None:
 
         # Random missing-modality mask — core of missing-modality robustness
         modality_mask = sample_modality_mask(volume.shape[0]).to(device)
-        volume = apply_modality_mask(volume, modality_mask)
+        volume_masked = apply_modality_mask(volume, modality_mask)
 
-        # Encode image → conditioning feature (gradient flows through encoder)
-        condition = multi_encoder(volume)    # (B, embed_dim, 12, 12, 12)
+        # Encode image → conditioning feature + optionally decode for recon loss
+        z_img = image_encoder.encode(volume_masked)   # (B, embed_dim, 12, 12, 12)
+
+        # Auxiliary reconstruction loss — gives encoder direct image supervision
+        recon = image_encoder.decode(z_img)           # (B, 4, D, H, W)
+        recon_loss = reconstruction_loss(recon, volume_masked)
 
         # Encode mask → clean latent target (VAE frozen, use mean only)
         with torch.no_grad():
             mu, _logvar = mask_vae.encode(mask_onehot)
-        z0 = mu                              # (B, latent_channels, 12, 12, 12)
+        z0 = mu                                        # (B, latent_channels, 12, 12, 12)
 
-        loss = diffusion_loss(unet, schedule, z0, condition)
+        diff_loss = diffusion_loss(unet, schedule, z0, z_img)
+
+        loss = diff_loss + args.recon_weight * recon_loss
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         if step % args.log_every == 0:
-            logger.log_metrics(step=step, train_loss=loss.item())
-            print(f"[{STAGE}] step={step}  loss={loss.item():.4f}")
+            logger.log_metrics(
+                step=step,
+                train_loss=loss.item(),
+                diff_loss=diff_loss.item(),
+                recon_loss=recon_loss.item(),
+            )
+            print(
+                f"[{STAGE}] step={step}  "
+                f"loss={loss.item():.4f}  "
+                f"diff={diff_loss.item():.4f}  "
+                f"recon={recon_loss.item():.4f}"
+            )
 
         if step % args.ckpt_every == 0 and step > start_step:
             ckpt_path = checkpoint_dir / f"step_{step}.pth"
             torch.save(
                 {
-                    "encoder_state_dict": multi_encoder.state_dict(),
+                    "encoder_state_dict": image_encoder.state_dict(),
                     "unet_state_dict": unet.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "step": step,
@@ -243,7 +272,7 @@ def main() -> None:
     final_ckpt_path = checkpoint_dir / "final.pth"
     torch.save(
         {
-            "encoder_state_dict": multi_encoder.state_dict(),
+            "encoder_state_dict": image_encoder.state_dict(),
             "unet_state_dict": unet.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "step": step,
@@ -258,8 +287,8 @@ def main() -> None:
         seed=args.seed,
     )
     logger.append_to_experiments_index(
-        f"4-encoder joint, {step} steps, embed_dim={args.encoder_embed_dim}, "
-        f"final_loss={loss.item():.4f}"
+        f"MONAI encoder joint, {step} steps, embed_dim={args.encoder_embed_dim}, "
+        f"recon_weight={args.recon_weight}, final_loss={loss.item():.4f}"
     )
 
 

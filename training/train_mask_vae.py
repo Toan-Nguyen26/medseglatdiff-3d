@@ -33,13 +33,18 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from data.brats_dataset import BraTSDataset, regions_to_seg
+from data.brats_dataset import BraTSDataset, regions_to_seg, subregions_to_regions
 from models.multiencoder.encoders import MaskVAE, mask_vae_loss
 from utils.run_logger import RunLogger, new_run_id, set_seed
+from utils.early_stopping import EarlyStopping
 
 STAGE = "mask_vae"
 REGION_NAMES = ["WT", "TC", "ET"]
 LABEL_COLOURS = {0: (0, 0, 0), 1: (0, 0, 200), 2: (0, 200, 0), 4: (200, 0, 0)}
+
+# pos_weight for 4-channel subregion mode [BG, NCR, ED, ET]
+# NCR is ~2% of voxels → upweight heavily so it's not ignored
+SUBREGION_POS_WEIGHT = torch.tensor([0.1, 10.0, 3.0, 5.0])
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,6 +61,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mask_vae_channels", type=str, default="32,64,128,128",
                         help="Comma-separated channel progression for MaskVAE encoder/decoder.")
     parser.add_argument("--num_res_units",     type=int, default=2)
+    parser.add_argument("--subregion_mode",    action="store_true",
+                        help="Predict 4-ch [BG,NCR,ED,ET] instead of 3-ch [WT,TC,ET]. "
+                             "Gives NCR its own channel and loss gradient.")
     parser.add_argument("--vae_beta",          type=float, default=1e-2,
                         help="Final KL weight after annealing completes. "
                              "Needs to be ~1e-2 so KL is visible vs recon (~1.5). "
@@ -72,8 +80,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--log_every",     type=int, default=50)
     parser.add_argument("--ckpt_every",    type=int, default=1000)
-    parser.add_argument("--val_every",     type=int, default=500)
+    parser.add_argument("--val_every",     type=int, default=200)
     parser.add_argument("--num_val_cases", type=int, default=4)
+
+    parser.add_argument("--early_stop_patience", type=int, default=15,
+                        help="Val checks with no Dice improvement before stopping. "
+                             "0 disables early stopping.")
+    parser.add_argument("--early_stop_min_delta", type=float, default=1e-4)
     parser.add_argument("--checkpoint_dir",type=str, default="checkpoints")
     parser.add_argument("--resume",        type=str, default=None)
     parser.add_argument("--seed",          type=int, default=42)
@@ -96,18 +109,27 @@ def run_val_metrics(
     vae: MaskVAE,
     val_cases: list[torch.Tensor],
     device: torch.device,
+    subregion_mode: bool = False,
 ) -> dict[str, float]:
     vae.eval()
     scores: dict[str, list[float]] = {r: [] for r in REGION_NAMES}
 
     for gt in val_cases:
-        gt = gt.to(device)                        # (1, 3, D, H, W)
+        gt = gt.to(device)
         recon_logits, _, _ = vae(gt)
-        recon_bin = (recon_logits.sigmoid() > 0.5).cpu().numpy()[0]  # (3, D, H, W)
-        gt_np     = gt.cpu().numpy()[0]                              # (3, D, H, W)
+        recon_bin = (recon_logits.sigmoid() > 0.5).cpu().numpy()[0]  # (C, D, H, W)
+        gt_np     = gt.cpu().numpy()[0]
+
+        if subregion_mode:
+            # convert 4-ch [BG,NCR,ED,ET] → 3-ch [WT,TC,ET] for metric computation
+            recon_regions = subregions_to_regions(recon_bin)
+            gt_regions    = subregions_to_regions(gt_np)
+        else:
+            recon_regions = recon_bin
+            gt_regions    = gt_np
 
         for i, r in enumerate(REGION_NAMES):
-            scores[r].append(_dice(recon_bin[i].astype(bool), gt_np[i].astype(bool)))
+            scores[r].append(_dice(recon_regions[i].astype(bool), gt_regions[i].astype(bool)))
 
     metrics = {r: float(np.mean(scores[r])) for r in REGION_NAMES}
     metrics["mean"] = float(np.mean(list(metrics.values())))
@@ -126,9 +148,24 @@ def _labels_to_rgb(label_map: np.ndarray) -> np.ndarray:
 
 
 def _best_tumour_slice(gt: np.ndarray) -> int:
+    # gt is (D, H, W); we display gt[:, :, z], so pick W-index with most tumor
     tumour = (gt != 0)
-    counts = tumour.sum(axis=(0, 1, 2))   # sum over C,H,W → per depth slice
+    counts = tumour.sum(axis=(0, 1))  # sum over D,H → (W,)
     return int(counts.argmax()) if counts.max() > 0 else gt.shape[-1] // 2
+
+
+def _to_seg(arr: np.ndarray, subregion_mode: bool) -> np.ndarray:
+    """Convert VAE output channels to a (D,H,W) label map for visualisation."""
+    if subregion_mode:
+        # arr: (4,D,H,W) [BG,NCR,ED,ET] — direct label assignment
+        seg = np.zeros(arr.shape[1:], dtype=np.uint8)
+        seg[arr[2] > 0.5] = 2   # ED
+        seg[arr[1] > 0.5] = 1   # NCR overwrites ED at boundaries
+        seg[arr[3] > 0.5] = 4   # ET overwrites NCR
+        return seg
+    else:
+        # arr: (3,D,H,W) [WT,TC,ET]
+        return regions_to_seg(arr[0], arr[1], arr[2])
 
 
 @torch.no_grad()
@@ -138,6 +175,7 @@ def save_recon_visualisation(
     device: torch.device,
     save_path: Path,
     step: int,
+    subregion_mode: bool = False,
 ) -> None:
     vae.eval()
     n = len(val_cases)
@@ -146,15 +184,13 @@ def save_recon_visualisation(
                  f"black=BG  blue=NCR  green=ED  red=ET", fontsize=9)
 
     for row, gt_tensor in enumerate(val_cases):
-        gt_dev  = gt_tensor.to(device)                          # (1, 3, D, H, W)
+        gt_dev  = gt_tensor.to(device)
         recon_logits, _, _ = vae(gt_dev)
-        recon_bin = recon_logits.sigmoid() > 0.5
+        recon_bin = recon_logits.sigmoid().cpu().numpy()[0]   # (C,D,H,W)
+        gt_np     = gt_dev[0].cpu().numpy()
 
-        gt_np    = gt_dev[0].cpu().numpy()                      # (3, D, H, W)
-        recon_np = recon_bin[0].float().cpu().numpy()
-
-        gt_seg    = regions_to_seg(gt_np[0],    gt_np[1],    gt_np[2])     # (D,H,W)
-        recon_seg = regions_to_seg(recon_np[0], recon_np[1], recon_np[2])
+        gt_seg    = _to_seg(gt_np,    subregion_mode)
+        recon_seg = _to_seg(recon_bin, subregion_mode)
 
         z = _best_tumour_slice(gt_seg)
 
@@ -183,9 +219,12 @@ def main() -> None:
     device     = torch.device(args.device)
     splits_dir = args.splits_dir or args.data_root
 
-    channels = tuple(int(c) for c in args.mask_vae_channels.split(","))
+    num_classes = 4 if args.subregion_mode else 3
+    channels    = tuple(int(c) for c in args.mask_vae_channels.split(","))
+    pos_weight  = SUBREGION_POS_WEIGHT if args.subregion_mode else None
+
     vae = MaskVAE(
-        num_classes=3,
+        num_classes=num_classes,
         latent_channels=args.latent_channels,
         channels=channels,
         num_res_units=args.num_res_units,
@@ -205,7 +244,8 @@ def main() -> None:
         root=args.data_root,
         split_file=os.path.join(splits_dir, args.split_file),
         crop_size=args.crop_size,
-        region_based=True,   # (3, D, H, W) binary masks [WT, TC, ET]
+        subregion_based=args.subregion_mode,
+        region_based=not args.subregion_mode,
     )
     loader = DataLoader(
         dataset,
@@ -223,7 +263,8 @@ def main() -> None:
             root=args.data_root,
             split_file=val_path,
             crop_size=args.crop_size,
-            region_based=True,
+            subregion_based=args.subregion_mode,
+            region_based=not args.subregion_mode,
             random_crop=False,
         )
         for i in range(min(args.num_val_cases, len(val_ds))):
@@ -243,11 +284,19 @@ def main() -> None:
     start_epoch     = start_step // max(1, steps_per_epoch)
     total_steps     = args.num_epochs * steps_per_epoch
 
+    spatial = args.crop_size // 8
     print(f"Training cases  : {len(dataset)}")
-    print(f"Latent channels : {args.latent_channels}  |  spatial 12³")
+    print(f"Mask channels   : {num_classes}  ({'subregion [BG,NCR,ED,ET]' if args.subregion_mode else 'region [WT,TC,ET]'})")
+    print(f"Latent          : {args.latent_channels}ch × {spatial}³")
     print(f"Total steps     : {total_steps}")
 
     best_mean_dice = 0.0
+    early_stopper = EarlyStopping(
+        patience=args.early_stop_patience,
+        min_delta=args.early_stop_min_delta,
+        warmup_steps=args.kl_warmup_steps,
+        mode="max",
+    ) if args.early_stop_patience > 0 else None
 
     vae.train()
     step = start_step
@@ -268,7 +317,7 @@ def main() -> None:
 
             recon_logits, mu, logvar = vae(mask)
             total, r_loss, k_loss = mask_vae_loss(
-                recon_logits, mask, mu, logvar, beta=beta
+                recon_logits, mask, mu, logvar, beta=beta, pos_weight=pos_weight
             )
 
             optimizer.zero_grad()
@@ -300,7 +349,7 @@ def main() -> None:
                 )
 
             if step % args.val_every == 0 and step > start_step and val_cases:
-                metrics = run_val_metrics(vae, val_cases, device)
+                metrics = run_val_metrics(vae, val_cases, device, subregion_mode=args.subregion_mode)
                 logger.log_metrics(step=step, csv="val", **metrics)
 
                 is_best = metrics["mean"] > best_mean_dice
@@ -315,16 +364,27 @@ def main() -> None:
                         "best_mean_dice": best_mean_dice,
                     }, checkpoint_dir / "best.pth")
 
+                es_status = ""
+                if early_stopper is not None:
+                    should_stop = early_stopper.step(metrics["mean"], step)
+                    es_status = f"  [{early_stopper.status}]"
+                    if should_stop:
+                        tqdm.write(f"  [early stop] no improvement for {early_stopper.patience} checks — stopping.")
+                        pbar.close()
+                        return
+
                 tqdm.write(
                     f"  [val]  Dice — "
                     + "  ".join(f"{r}={metrics[r]:.3f}" for r in REGION_NAMES)
                     + f"  mean={metrics['mean']:.3f}"
                     + ("  ← best" if is_best else "")
+                    + es_status
                 )
                 save_recon_visualisation(
                     vae, val_cases, device,
                     vis_dir / f"recon_step_{step:06d}.png",
                     step,
+                    subregion_mode=args.subregion_mode,
                 )
                 vae.train()
 

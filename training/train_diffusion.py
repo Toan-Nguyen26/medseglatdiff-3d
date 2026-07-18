@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size",   type=int,   default=1)
     p.add_argument("--lr",           type=float, default=1e-4)
     p.add_argument("--weight_decay", type=float, default=1e-4)
-    p.add_argument("--num_workers",  type=int,   default=2)
+    p.add_argument("--num_workers",  type=int,   default=8)
 
     # Logging
     p.add_argument("--log_every",      type=int, default=50)
@@ -133,12 +133,15 @@ def val_dice(
         vol_in = apply_modality_mask(vol, mod_mask)
 
         # DDIM denoising
+        use_amp = (device.type == "cuda")
         x = torch.randn(1, 3, *spatial, device=device)
         for t in inf_scheduler.timesteps:
             t_batch = torch.full((1,), t, device=device, dtype=torch.long)
             x_in = torch.cat([vol_in, x], dim=1)     # (1, 7, 96, 96, 96)
-            pred_noise = unet(x_in, t_batch)
-            x = inf_scheduler.step(pred_noise, t, x)[0].to(device).float()
+            with torch.autocast(device_type=device.type,
+                                dtype=torch.bfloat16, enabled=use_amp):
+                pred_noise = unet(x_in, t_batch)
+            x = inf_scheduler.step(pred_noise.float(), t, x)[0].to(device).float()
 
         # x is in [-1, +1] → map to [0, 1] → threshold
         pred_bin = ((x[0] + 1.0) / 2.0 > 0.5).cpu().numpy()  # (3, D, H, W)
@@ -176,6 +179,10 @@ def main() -> None:
     optimizer = torch.optim.AdamW(unet.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
     noise_scheduler = DDPMScheduler(num_train_timesteps=args.num_timesteps)
+
+    # bf16 mixed precision — ~2-4x speedup on H200 with no quality loss
+    use_amp = (device.type == "cuda")
+    scaler  = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     start_step = 0
     if args.resume is not None:
@@ -257,14 +264,18 @@ def main() -> None:
             x_t = noise_scheduler.add_noise(x_0, epsilon, t)
 
             # Concat image + noisy mask → predict noise
-            x_input    = torch.cat([volume_masked, x_t], dim=1)   # (B, 7, 96, 96, 96)
-            pred_noise = unet(x_input, t)
-            loss       = F.mse_loss(pred_noise, epsilon)
+            x_input = torch.cat([volume_masked, x_t], dim=1)       # (B, 7, 96, 96, 96)
+            with torch.autocast(device_type=device.type,
+                                dtype=torch.bfloat16, enabled=use_amp):
+                pred_noise = unet(x_input, t)
+                loss       = F.mse_loss(pred_noise, epsilon)
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(unet.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             pbar.set_postfix(epoch=f"{epoch+1}/{args.num_epochs}",
                              loss=f"{loss.item():.4f}")

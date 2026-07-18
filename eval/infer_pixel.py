@@ -207,14 +207,17 @@ def infer_n_samples(
     inf_scheduler.set_timesteps(num_inference_steps)
     spatial = vol_masked.shape[2:]
 
+    use_amp = (device.type == "cuda")
     samples = []
     for _ in range(n_samples):
         x = torch.randn(1, 3, *spatial, device=device)
         for t in inf_scheduler.timesteps:
             t_batch = torch.full((1,), t, device=device, dtype=torch.long)
             x_in    = torch.cat([vol_masked, x], dim=1)   # (1, 7, D, H, W)
-            pred_noise = unet(x_in, t_batch)
-            x = inf_scheduler.step(pred_noise, t, x)[0].to(device).float()
+            with torch.autocast(device_type=device.type,
+                                dtype=torch.bfloat16, enabled=use_amp):
+                pred_noise = unet(x_in, t_batch)
+            x = inf_scheduler.step(pred_noise.float(), t, x)[0].to(device).float()
 
         # x in [-1, +1] → [0, 1]
         probs = ((x[0] + 1.0) / 2.0).clamp(0.0, 1.0).cpu().numpy()  # (3, D, H, W)
