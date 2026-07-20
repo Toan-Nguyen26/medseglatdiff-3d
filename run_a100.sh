@@ -22,6 +22,8 @@ SPLITS_DIR="${SPLITS_DIR:-splits/brats_roi128_full}" # train/val/test splits
 CKPT_DIR="${CKPT_DIR:-checkpoints}"
 DEVICE="${DEVICE:-cuda}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
+BATCH_VAE="${BATCH_VAE:-4}"       # increase to 8 on H200
+BATCH_DIFF="${BATCH_DIFF:-32}"    # increase to 64 on H200
 
 # ─── ENV SETUP ──────────────────────────────────────────────
 ENV_NAME="medseg"
@@ -154,7 +156,7 @@ if [ -z "$IMAGE_VAE_CKPT" ]; then
         --crop_size        128 \
         --encoder_channels 64,128,256 \
         --num_epochs       200 \
-        --batch_size       4 \
+        --batch_size       "$BATCH_VAE" \
         --num_workers      "$NUM_WORKERS" \
         --val_every        200 \
         --early_stop_patience 25 \
@@ -177,7 +179,7 @@ if [ -z "$MASK_VAE_CKPT" ]; then
         --mask_vae_channels  32,64,128 \
         --latent_channels    4 \
         --num_epochs         200 \
-        --batch_size         4 \
+        --batch_size         "$BATCH_VAE" \
         --num_workers        "$NUM_WORKERS" \
         --val_every          200 \
         --early_stop_patience 25 \
@@ -226,7 +228,7 @@ if [ -z "$DIFF_CKPT" ]; then
         --splits_dir     "$SPLITS_DIR" \
         --checkpoint_dir "$CKPT_DIR" \
         --num_steps      200000 \
-        --batch_size     32 \
+        --batch_size     "$BATCH_DIFF" \
         --num_workers    "$NUM_WORKERS" \
         --device         "$DEVICE"
 else
