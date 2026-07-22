@@ -128,6 +128,9 @@ if [ ! -f "$PROC_SENTINEL" ]; then
         --output_dir "$DATA_PROC" \
         --crop_size  128
 
+    echo "[2c] Removing full-res intermediates (saves ~400 GB)..."
+    rm -rf "$FULL_DIR"
+
     touch "$PROC_SENTINEL"
 else
     echo "[2] Already done — skipping  ($DATA_PROC)"

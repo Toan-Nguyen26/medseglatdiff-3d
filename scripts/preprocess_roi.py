@@ -14,7 +14,7 @@ Input layout (output of preprocess_brats.py):
 
 Output layout (same naming, new directory):
     output_dir/
-      vol/{name}_vol.npy    (96, 96, 96, 4) float32
+      vol/{name}_vol.npy    (96, 96, 96, 4) float16  (cast to float32 on load)
       seg/{name}_seg.npy    (96, 96, 96)    uint8
       train.txt / val.txt / test.txt        (copied from data_root)
       roi_coords.json                       (crop metadata per case)
@@ -211,7 +211,7 @@ def main() -> None:
         vol_crop = vol[h0:h0+crop, w0:w0+crop, d0:d0+crop, :]   # (96,96,96,4)
         seg_crop = seg[h0:h0+crop, w0:w0+crop, d0:d0+crop]       # (96,96,96)
 
-        vol_crop = np.ascontiguousarray(vol_crop, dtype=np.float32)
+        vol_crop = np.ascontiguousarray(vol_crop, dtype=np.float16)
         seg_crop = np.ascontiguousarray(seg_crop, dtype=np.uint8)
 
         # ------------------------------------------------------------------
