@@ -62,9 +62,8 @@ _setup_env() {
     echo "[env] Environment ready  ($(python3 --version))"
 }
 
-# ─── HuggingFace dataset URLs ───────────────────────────────
-HF_2023="https://huggingface.co/tom-ngh/brats-data/resolve/main/brats2023.tar"
-HF_2024="https://huggingface.co/tom-ngh/brats-data/resolve/main/brats2024.tar"
+# ─── HuggingFace repo ───────────────────────────────────────
+HF_REPO="tom-ngh/brats-data"
 
 # ─── HELPERS ────────────────────────────────────────────────
 _latest_ckpt() {
@@ -85,10 +84,10 @@ banner "Step 1 — Download BraTS data from HuggingFace"
 mkdir -p "$DATA_RAW"
 
 _hf_download() {
-    local url="$1" name="$2"
+    local name="$1"
     if [ ! -d "$DATA_RAW/$name" ]; then
-        echo "[1] Downloading $name from HuggingFace..."
-        wget -q --show-progress "$url" -O "$DATA_RAW/${name}.tar"
+        echo "[1] Downloading ${name}.tar from HuggingFace..."
+        huggingface-cli download "$HF_REPO" "${name}.tar" --local-dir "$DATA_RAW"
         echo "[1] Extracting $name..."
         mkdir -p "$DATA_RAW/$name"
         tar -xf "$DATA_RAW/${name}.tar" -C "$DATA_RAW/$name" --strip-components=1
@@ -98,8 +97,8 @@ _hf_download() {
     fi
 }
 
-_hf_download "$HF_2023" "brats2023"
-_hf_download "$HF_2024" "brats2024"
+_hf_download "brats2023"
+_hf_download "brats2024"
 
 # ════════════════════════════════════════════════════════════
 banner "Step 2 — Preprocess raw BraTS → 128³ ROI crops"

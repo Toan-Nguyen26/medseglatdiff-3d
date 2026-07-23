@@ -31,6 +31,9 @@ from pathlib import Path
 
 import nibabel as nib
 import numpy as np
+import multiprocessing 
+from multiprocessing import Pool, cpu_count
+import tqdm
 
 MODALITY_SUFFIXES = ["t2f", "t1c", "t1n", "t2w"]  # → channels 0,1,2,3 (FLAIR,T1ce,T1,T2)
 
@@ -49,7 +52,8 @@ def zscore_normalise(volume: np.ndarray) -> np.ndarray:
     return out
 
 
-def process_case(case_dir: Path, seg_out: Path, vol_out: Path) -> bool:
+def process_case(args) -> bool:
+    (case_dir, seg_out, vol_out) = args
     name = case_dir.name
 
     seg_path = case_dir / f"{name}-seg.nii.gz"
@@ -57,11 +61,11 @@ def process_case(case_dir: Path, seg_out: Path, vol_out: Path) -> bool:
 
     if not seg_path.exists():
         print(f"  SKIP {name}: missing seg file")
-        return False
+        return None
     for p in mod_paths:
         if not p.exists():
             print(f"  SKIP {name}: missing {p.name}")
-            return False
+            return None
 
     seg_arr = nib.load(seg_path).get_fdata().astype(np.uint8)
     np.save(seg_out / f"{name}_seg.npy", seg_arr)
@@ -72,8 +76,7 @@ def process_case(case_dir: Path, seg_out: Path, vol_out: Path) -> bool:
         modalities.append(zscore_normalise(arr))
     vol_arr = np.stack(modalities, axis=-1)  # (H, W, D, 4)
     np.save(vol_out / f"{name}_vol.npy", vol_arr)
-
-    return True
+    return name
 
 
 def make_splits(names: list[str], val_frac: float, test_frac: float, seed: int) -> tuple[list, list, list]:
@@ -108,15 +111,18 @@ def main() -> None:
     vol_out.mkdir(parents=True, exist_ok=True)
 
     case_dirs = sorted(p for p in data_root.iterdir() if p.is_dir())
+    tasks = [(case_dir, seg_out, vol_out) for case_dir in case_dirs]
     print(f"Found {len(case_dirs)} cases in {data_root}")
-
-    done = []
-    for i, case_dir in enumerate(case_dirs):
-        print(f"[{i+1}/{len(case_dirs)}] {case_dir.name}", end=" ... ", flush=True)
-        ok = process_case(case_dir, seg_out, vol_out)
-        if ok:
-            done.append(case_dir.name)
-            print("done")
+    with multiprocessing.Pool(8) as pool:
+        done = list(tqdm.tqdm(pool.imap(process_case, tasks), total=len(tasks), desc="Processing cases"))
+    
+    # for i, case_dir in enumerate(case_dirs):
+    #     print(f"[{i+1}/{len(case_dirs)}] {case_dir.name}", end=" ... ", flush=True)
+    #     ok = process_case(case_dir, seg_out, vol_out)
+    #     if ok:
+    #         done.append(case_dir.name)
+    #         print("done")
+    done = [x for x in done if x is not None]
 
     train, val, test = make_splits(done, args.val_frac, args.test_frac, args.seed)
     (out / "train.txt").write_text("\n".join(train))
