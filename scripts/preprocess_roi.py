@@ -40,6 +40,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
+from copy import copy
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,82 @@ def parse_args() -> argparse.Namespace:
                    help="Warn when WT coverage < this value (default 0.9 = 90%%)")
     return p.parse_args()
 
+def process_case(
+                    arguments
+                    ):
+        (name,
+        vol_src,
+        seg_src,
+        vol_dst,
+        seg_dst,
+        crop,
+        coverage_warn,
+        coverage_log,
+        n_partial,
+        roi_coords) = arguments
+        # ---------------- Load ----------------
+        vol = np.asarray(np.load(vol_src / f"{name}_vol.npy", mmap_mode="r"))
+        seg = np.asarray(np.load(seg_src / f"{name}_seg.npy", mmap_mode="r"))
+
+        # ---------------- Pad -----------------
+        vol = pad_to_crop(vol, crop, spatial_axes=(0, 1, 2))
+        seg = pad_to_crop(seg, crop, spatial_axes=(0, 1, 2))
+
+        H, W, D = seg.shape
+
+        # ---------------- Centroid ----------------
+        centroid = bbox_centroid(seg)
+        no_tumour = False
+
+        if centroid is None:
+            centroid = (H // 2, W // 2, D // 2)
+            no_tumour = True
+
+        ch, cw, cd = centroid
+
+        # ---------------- Crop ----------------
+        h0 = crop_start(ch, crop, H)
+        w0 = crop_start(cw, crop, W)
+        d0 = crop_start(cd, crop, D)
+
+        vol_crop = vol[h0:h0+crop, w0:w0+crop, d0:d0+crop, :]
+        seg_crop = seg[h0:h0+crop, w0:w0+crop, d0:d0+crop]
+
+        vol_crop = np.interp(
+            vol_crop,
+            (vol_crop.min(), vol_crop.max()),
+            (0, 1)
+        ) * 255
+
+        vol_crop = np.ascontiguousarray(vol_crop.astype(np.uint8))
+        seg_crop = np.ascontiguousarray(seg_crop.astype(np.uint8))
+        # ------------------------------------------------------------------
+        # Coverage stats
+        # ------------------------------------------------------------------
+        cov      = compute_coverage(seg, h0, w0, d0, crop)
+        partial  = cov["WT"] < coverage_warn
+        if partial:
+            n_partial += 1
+            tqdm.write(
+                f"  [partial] {name}  "
+                f"WT={cov['WT']:.2%}  TC={cov['TC']:.2%}  ET={cov['ET']:.2%}"
+            )
+
+        roi_coords[name] = {
+            "crop_start":   [int(h0), int(w0), int(d0)],
+            "volume_shape": [int(H),  int(W),  int(D)],
+            "centroid":     [int(ch), int(cw), int(cd)],
+            "coverage":     {r: round(v, 4) for r, v in cov.items()},
+            "partial":      bool(partial),
+        }
+        coverage_log.append((cov["WT"], name))
+        # ------------------------------------------------------------------
+        # Save (keep channel-last for BraTSDataset compatibility)
+        # ------------------------------------------------------------------
+        np.save(vol_dst / f"{name}_vol.npy", vol_crop)
+        np.save(seg_dst / f"{name}_seg.npy", seg_crop)
+
+        return name
 
 # ---------------------------------------------------------------------------
 # Main
@@ -172,93 +249,6 @@ def main() -> None:
     n_no_tumour = 0
     coverage_log: list[tuple[float, str]] = []  # (WT coverage, name)
 
-    def process_case(
-                        args
-                    ):
-        (name,
-        vol_src,
-        seg_src,
-        vol_dst,
-        seg_dst,
-        crop,
-        coverage_warn,
-        roi_coords) = args
-        # ---------------- Load ----------------
-        vol = np.asarray(np.load(vol_src / f"{name}_vol.npy", mmap_mode="r"))
-        seg = np.asarray(np.load(seg_src / f"{name}_seg.npy", mmap_mode="r"))
-
-        # ---------------- Pad -----------------
-        vol = pad_to_crop(vol, crop, spatial_axes=(0, 1, 2))
-        seg = pad_to_crop(seg, crop, spatial_axes=(0, 1, 2))
-
-        H, W, D = seg.shape
-
-        # ---------------- Centroid ----------------
-        centroid = bbox_centroid(seg)
-        no_tumour = False
-
-        if centroid is None:
-            centroid = (H // 2, W // 2, D // 2)
-            no_tumour = True
-
-        ch, cw, cd = centroid
-
-        # ---------------- Crop ----------------
-        h0 = crop_start(ch, crop, H)
-        w0 = crop_start(cw, crop, W)
-        d0 = crop_start(cd, crop, D)
-
-        vol_crop = vol[h0:h0+crop, w0:w0+crop, d0:d0+crop, :]
-        seg_crop = seg[h0:h0+crop, w0:w0+crop, d0:d0+crop]
-
-        vol_crop = np.interp(
-            np.clip(vol_crop, -5, 5),
-            (-5, 5),
-            (0, 255)
-        )
-
-        vol_crop = np.ascontiguousarray(vol_crop.astype(np.uint8))
-        seg_crop = np.ascontiguousarray(seg_crop.astype(np.uint8))
-        # ------------------------------------------------------------------
-        # Coverage stats
-        # ------------------------------------------------------------------
-        cov      = compute_coverage(seg, h0, w0, d0, crop)
-        partial  = cov["WT"] < args.coverage_warn
-        if partial:
-            n_partial += 1
-            tqdm.write(
-                f"  [partial] {name}  "
-                f"WT={cov['WT']:.2%}  TC={cov['TC']:.2%}  ET={cov['ET']:.2%}"
-            )
-
-        roi_coords[name] = {
-            "crop_start":   [int(h0), int(w0), int(d0)],
-            "volume_shape": [int(H),  int(W),  int(D)],
-            "centroid":     [int(ch), int(cw), int(cd)],
-            "coverage":     {r: round(v, 4) for r, v in cov.items()},
-            "partial":      bool(partial),
-        }
-        coverage_log.append((cov["WT"], name))
-        # ------------------------------------------------------------------
-        # Save (keep channel-last for BraTSDataset compatibility)
-        # ------------------------------------------------------------------
-        np.save(vol_dst / f"{name}_vol.npy", vol_crop)
-        np.save(seg_dst / f"{name}_seg.npy", seg_crop)
-
-        return (
-            name,
-            {
-                "crop_start": [int(h0), int(w0), int(d0)],
-                "volume_shape": [int(H), int(W), int(D)],
-                "centroid": [int(ch), int(cw), int(cd)],
-                "coverage": {r: round(v, 4) for r, v in cov.items()},
-                "partial": partial,
-            },
-            cov["WT"],
-            partial,
-            no_tumour,
-            cov,
-        )
     
     tasks = [
             (
@@ -268,7 +258,9 @@ def main() -> None:
                 vol_dst,
                 seg_dst,
                 crop,
-                args.coverage_warn,
+                copy(args.coverage_warn),
+                coverage_log,
+                n_partial, 
                 roi_coords
             )
             for name in cases
@@ -277,7 +269,7 @@ def main() -> None:
     with Pool(8) as pool:
         results = list(
             tqdm(
-                pool.starmap(process_case, tasks),
+                pool.imap(process_case, tasks),
                 total=len(tasks),
                 desc="ROI crop",
                 unit="case",

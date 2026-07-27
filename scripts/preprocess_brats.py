@@ -72,7 +72,11 @@ def process_case(args) -> bool:
 
     modalities = []
     for p in mod_paths:
-        arr = nib.load(p).get_fdata().astype(np.float32)
+        try:
+            arr = nib.load(p).get_fdata().astype(np.float32)
+        except Exception as e:
+            print(f"SKIP {p}: {e}")
+            return None
         modalities.append(zscore_normalise(arr))
     vol_arr = np.stack(modalities, axis=-1)  # (H, W, D, 4)
     np.save(vol_out / f"{name}_vol.npy", vol_arr)
