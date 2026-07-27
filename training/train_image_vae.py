@@ -410,11 +410,16 @@ def main() -> None:
         mode="max",
     ) if args.early_stop_patience > 0 else None
 
+    best_mean_ssim = -float("inf")
+
     vae.train()
     step = start_step
+    stop_early = False
     pbar = tqdm(total=total_steps, initial=start_step, desc=f"[{STAGE}]", unit="step")
 
     for epoch in range(start_epoch, args.num_epochs):
+        if stop_early:
+            break
         tqdm.write(f"\n[{STAGE}] Epoch {epoch + 1}/{args.num_epochs}")
 
         for volume, _ in loader:
@@ -474,14 +479,27 @@ def main() -> None:
             if step % args.val_every == 0 and step > start_step and val_cases:
                 metrics = run_val_metrics(vae, val_cases, device)
                 logger.log_metrics(step=step, csv="val", **metrics)
+
+                is_best = metrics["mean_ssim"] > best_mean_ssim
+                if is_best:
+                    best_mean_ssim = metrics["mean_ssim"]
+                    torch.save({
+                        "vae_state_dict":       vae.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "step":   step,
+                        "epoch":  epoch,
+                        "config": vars(args),
+                        "best_mean_ssim": best_mean_ssim,
+                    }, checkpoint_dir / "best.pth")
+
                 es_status = ""
                 if early_stopper is not None:
                     should_stop = early_stopper.step(metrics["mean_ssim"], step)
                     es_status = f"  [{early_stopper.status}]"
                     if should_stop:
                         tqdm.write(f"  [early stop] no SSIM improvement for {early_stopper.patience} checks — stopping.")
-                        pbar.close()
-                        return
+                        tqdm.write(f"  [early stop] best mean_ssim={best_mean_ssim:.4f} → best.pth")
+                        stop_early = True
 
                 tqdm.write(
                     f"  [val]  SSIM — "
@@ -509,6 +527,9 @@ def main() -> None:
             step += 1
             pbar.update(1)
 
+            if stop_early:
+                break
+
     pbar.close()
     final_path = checkpoint_dir / "final.pth"
     torch.save({
@@ -519,6 +540,10 @@ def main() -> None:
         "config": vars(args),
     }, final_path)
     print(f"\nDone. Checkpoint saved → {final_path}")
+    best_path = checkpoint_dir / "best.pth"
+    if best_path.exists():
+        print(f"Best checkpoint (mean_ssim={best_mean_ssim:.4f}) → {best_path}")
+        print("Use best.pth downstream — final.pth is the resume point.")
 
     # --- Test evaluation: reconstruction visualisation on held-out test cases ---
     if test_cases:

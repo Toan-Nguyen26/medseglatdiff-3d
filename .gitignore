@@ -7,6 +7,7 @@ data/brats2023*/
 data/brats2024*/
 data/ASNR-*/
 data/BRATS_*/
+cache
 *.nii.gz
 *.npy
 *.npz
