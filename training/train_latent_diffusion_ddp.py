@@ -67,6 +67,7 @@ from utils.ddp import (
     unwrap,
     warmup_factor,
 )
+from utils.retention import prune_oldest
 from utils.run_logger import RunLogger, new_run_id, set_seed
 
 # Single source of truth for everything that is not the training loop.
@@ -95,12 +96,21 @@ def parse_args():
                      help="Do not multiply --lr by world size.")
     ddp.add_argument("--warmup_steps", type=int, default=1000,
                      help="Linear LR warmup steps; needed when LR is scaled up.")
+    # Retention lives here rather than in the base parser because
+    # train_latent_diffusion.py is not ours to modify.
+    ddp.add_argument("--keep_checkpoints", type=int, default=10,
+                     help="Rolling window of periodic step_*.pth files to keep. "
+                          "best.pth and final.pth are never pruned. 0 disables.")
+    ddp.add_argument("--keep_vis", type=int, default=20,
+                     help="Rolling window of validation PNGs to keep. 0 disables.")
     ddp_args, remaining = ddp.parse_known_args()
 
     sys.argv = [sys.argv[0]] + remaining
     args = _base_parse_args()
-    args.no_lr_scale  = ddp_args.no_lr_scale
-    args.warmup_steps = ddp_args.warmup_steps
+    args.no_lr_scale      = ddp_args.no_lr_scale
+    args.warmup_steps     = ddp_args.warmup_steps
+    args.keep_checkpoints = ddp_args.keep_checkpoints
+    args.keep_vis         = ddp_args.keep_vis
     return args
 
 
@@ -305,10 +315,12 @@ def main() -> None:
                     device=device, subregion=subregion,
                     n_inf_steps=args.num_inference_steps,
                 )
+                prune_oldest(vis_dir, "step_*.png", args.keep_vis)
                 unet.train()
 
             if step % args.ckpt_every == 0:
                 torch.save(_ckpt_payload(), ckpt_dir / f"step_{step}.pth")
+                prune_oldest(ckpt_dir, "step_*.pth", args.keep_checkpoints)
 
     pbar.close()
 

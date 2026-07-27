@@ -41,6 +41,7 @@ from tqdm import tqdm
 
 from data.brats_dataset import BraTSDataset, apply_modality_mask, sample_modality_mask
 from utils.early_stopping import EarlyStopping
+from utils.retention import prune_oldest
 from models.multiencoder.encoders import ImageVAE, vae_loss
 from utils.run_logger import RunLogger, new_run_id, set_seed
 
@@ -92,6 +93,9 @@ def parse_args() -> argparse.Namespace:
     # Logging / checkpointing
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--ckpt_every", type=int, default=1000)
+    parser.add_argument("--keep_checkpoints", type=int, default=10,
+                        help="Rolling window of periodic step_*.pth files to keep. "
+                             "best.pth and final.pth are never pruned. 0 disables.")
     parser.add_argument("--val_every", type=int, default=200,
                         help="Run SSIM/PSNR validation every N steps")
     parser.add_argument("--num_val_cases", type=int, default=5)
@@ -523,6 +527,7 @@ def main() -> None:
                     "epoch": epoch,
                     "config": vars(args),
                 }, ckpt_path)
+                prune_oldest(checkpoint_dir, "step_*.pth", args.keep_checkpoints)
 
             step += 1
             pbar.update(1)

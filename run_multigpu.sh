@@ -36,6 +36,12 @@ BATCH_DIFF="${BATCH_DIFF:-32}"
 NUM_VAL_VAE="${NUM_VAL_VAE:-50}"
 NUM_VAL_DIFF="${NUM_VAL_DIFF:-30}"
 
+# Artefact retention. Without a cap these runs write ~200 periodic .pth per
+# trainer and ~1000 validation PNGs. Only the newest N of each are kept;
+# best.pth and final.pth are never pruned.
+KEEP_CKPTS="${KEEP_CKPTS:-10}"
+KEEP_VIS="${KEEP_VIS:-20}"
+
 # Budgets.
 #
 # EPOCHS_VAE is per-rank work: DistributedSampler shards the data, so one
@@ -71,6 +77,7 @@ echo "  Diffusion batch   : $BATCH_DIFF per GPU  →  $((BATCH_DIFF * NUM_GPUS))
 echo "  ImageVAE  epochs  : $EPOCHS_VAE  (${EPOCHS_VAE_BASE} × ${NUM_GPUS} GPUs)"
 echo "  Diffusion steps   : $STEPS_DIFF"
 echo "  Val cases         : VAE $NUM_VAL_VAE  |  diffusion $NUM_VAL_DIFF"
+echo "  Keep              : $KEEP_CKPTS checkpoints  |  $KEEP_VIS visualisations"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null || true
 
 # ════════════════════════════════════════════════════════════
@@ -95,6 +102,7 @@ else
         --num_workers      "$NUM_WORKERS" \
         --val_every        200 \
         --num_val_cases    "$NUM_VAL_VAE" \
+        --keep_checkpoints "$KEEP_CKPTS" \
         --early_stop_patience 25 \
         --device           cuda
     IMAGE_VAE_CKPT=$(_resolve_ckpt "image_vae_*")
@@ -129,6 +137,8 @@ echo "[2] MaskVAE  → $MASK_VAE_CKPT"
     --batch_size     "$BATCH_DIFF" \
     --num_workers    "$NUM_WORKERS" \
     --num_val_cases  "$NUM_VAL_DIFF" \
+    --keep_checkpoints "$KEEP_CKPTS" \
+    --keep_vis       "$KEEP_VIS" \
     --device         cuda
 
 DIFF_CKPT=$(_resolve_ckpt "latent_diffusion_*")

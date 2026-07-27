@@ -59,6 +59,7 @@ from utils.ddp import (
     warmup_factor,
 )
 from utils.early_stopping import EarlyStopping
+from utils.retention import prune_oldest
 from utils.run_logger import RunLogger, new_run_id, set_seed
 
 # Single source of truth for everything that is not the training loop.
@@ -314,6 +315,7 @@ def main() -> None:
                         "epoch":  epoch,
                         "config": vars(args),
                     }, checkpoint_dir / f"step_{step}.pth")
+                    prune_oldest(checkpoint_dir, "step_*.pth", args.keep_checkpoints)
 
             step += 1
             if rank == 0:
