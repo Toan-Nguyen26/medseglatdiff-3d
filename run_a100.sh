@@ -24,6 +24,8 @@ DEVICE="${DEVICE:-cuda}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 BATCH_VAE="${BATCH_VAE:-4}"       # increase to 8 on H200
 BATCH_DIFF="${BATCH_DIFF:-32}"    # increase to 64 on H200
+N_SAMPLES="${N_SAMPLES:-5}"       # DDIM chains per case (uncertainty estimate)
+INFER_STEPS="${INFER_STEPS:-50}"  # DDIM steps per chain
 
 # ─── ENV SETUP ──────────────────────────────────────────────
 ENV_NAME="medseg"
@@ -233,15 +235,46 @@ if [ -z "$DIFF_CKPT" ]; then
         --batch_size     "$BATCH_DIFF" \
         --num_workers    "$NUM_WORKERS" \
         --device         "$DEVICE"
+    DIFF_CKPT=$(_latest_ckpt "latent_diffusion_*" "best.pth")
 else
     echo "[7] Found diffusion checkpoint — skipping  ($DIFF_CKPT)"
+fi
+
+# ════════════════════════════════════════════════════════════
+banner "Step 8 — Evaluate on test split (all 15 modality combos)"
+# ════════════════════════════════════════════════════════════
+# Runs the held-out test split through N independent DDIM chains per case,
+# for every non-empty subset of {FLAIR, T1ce, T1, T2}. This produces the
+# main missing-modality table.
+if [ -z "$DIFF_CKPT" ]; then
+    echo "[8] ERROR: no diffusion checkpoint found — cannot evaluate"
+    exit 1
+fi
+
+EVAL_DIR="${EVAL_DIR:-eval_output/latent_diffusion}"
+if [ ! -f "$EVAL_DIR/summary_all_combos.csv" ]; then
+    python3 -m eval.infer_latent \
+        --diffusion_ckpt      "$DIFF_CKPT" \
+        --data_root           "$DATA_PROC" \
+        --splits_dir          "$SPLITS_DIR" \
+        --output_dir          "$EVAL_DIR" \
+        --n_samples           "$N_SAMPLES" \
+        --num_inference_steps "$INFER_STEPS" \
+        --all_combos \
+        --device              "$DEVICE"
+else
+    echo "[8] Eval already done — skipping  ($EVAL_DIR)"
 fi
 
 # ════════════════════════════════════════════════════════════
 echo ""
 echo "Done."
 echo ""
-echo "VAE checkpoints:"
+echo "Checkpoints:"
 echo "  ImageVAE  : $IMAGE_VAE_CKPT"
 echo "  MaskVAE   : $MASK_VAE_CKPT"
+echo "  Diffusion : $DIFF_CKPT"
+echo "  Eval      : $EVAL_DIR"
+echo ""
+echo "Next:  bash collect_results.sh    # zips checkpoints + logs + eval to send back"
 echo "  Latents   : $LATENT_DIR"
