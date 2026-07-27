@@ -267,14 +267,14 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-echo ""
-echo "Done."
+banner "Step 9 — Package results"
+# ════════════════════════════════════════════════════════════
+bash "$(dirname "$0")/collect_results.sh"
+
 echo ""
 echo "Checkpoints:"
 echo "  ImageVAE  : $IMAGE_VAE_CKPT"
 echo "  MaskVAE   : $MASK_VAE_CKPT"
 echo "  Diffusion : $DIFF_CKPT"
 echo "  Eval      : $EVAL_DIR"
-echo ""
-echo "Next:  bash collect_results.sh    # zips checkpoints + logs + eval to send back"
 echo "  Latents   : $LATENT_DIR"
