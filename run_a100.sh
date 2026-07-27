@@ -252,7 +252,7 @@ if [ -z "$DIFF_CKPT" ]; then
 fi
 
 EVAL_DIR="${EVAL_DIR:-eval_output/latent_diffusion}"
-if [ ! -f "$EVAL_DIR/summary_all_combos.csv" ]; then
+if [ ! -f "$EVAL_DIR/summary.csv" ]; then
     python3 -m eval.infer_latent \
         --diffusion_ckpt      "$DIFF_CKPT" \
         --data_root           "$DATA_PROC" \
