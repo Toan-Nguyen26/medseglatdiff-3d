@@ -98,7 +98,7 @@ def parse_args():
                      help="Linear LR warmup steps; needed when LR is scaled up.")
     # Retention lives here rather than in the base parser because
     # train_latent_diffusion.py is not ours to modify.
-    ddp.add_argument("--keep_checkpoints", type=int, default=10,
+    ddp.add_argument("--keep_checkpoints", type=int, default=20,
                      help="Rolling window of periodic step_*.pth files to keep. "
                           "best.pth and final.pth are never pruned. 0 disables.")
     ddp.add_argument("--keep_vis", type=int, default=20,

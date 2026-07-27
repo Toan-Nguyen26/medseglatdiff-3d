@@ -182,7 +182,7 @@ def main() -> None:
 
     # ── Run setup (rank 0 owns the run directory) ────────────────────────────
     logger = None
-    checkpoint_dir = None
+    checkpoint_dir = vis_dir = None
     if rank == 0:
         run_id = new_run_id(STAGE)
         logger = RunLogger(run_id=run_id, stage=STAGE, config=vars(args))
@@ -190,6 +190,9 @@ def main() -> None:
                     f"{args.batch_size * world_size} lr={lr_used:.2e}")
         checkpoint_dir = Path(args.checkpoint_dir) / run_id
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # Alongside the checkpoints, so collect_results.sh picks these up.
+        vis_dir = checkpoint_dir / "visualisations"
+        vis_dir.mkdir(exist_ok=True)
 
     steps_per_epoch = len(loader)
     total_steps     = args.num_epochs * steps_per_epoch
@@ -317,6 +320,16 @@ def main() -> None:
                     }, checkpoint_dir / f"step_{step}.pth")
                     prune_oldest(checkpoint_dir, "step_*.pth", args.keep_checkpoints)
 
+                if args.vis_every > 0 and step % args.vis_every == 0 \
+                        and step > start_step and val_cases:
+                    # First few val cases only — the grid is one row per case.
+                    save_recon_visualisation(
+                        unwrap(vae), val_cases[:args.num_test_vis_cases], device,
+                        vis_dir / f"recon_step_{step:07d}.png",
+                    )
+                    prune_oldest(vis_dir, "recon_step_*.png", args.keep_vis)
+                    vae.train()
+
             step += 1
             if rank == 0:
                 pbar.update(1)
@@ -350,7 +363,7 @@ def main() -> None:
             print("Use best.pth downstream — final.pth is the resume point.")
 
         if test_cases:
-            vis_path = logger.run_dir / "vis" / "test_recon_final.png"
+            vis_path = vis_dir / "test_recon_final.png"
             save_recon_visualisation(unwrap(vae), test_cases, device, vis_path)
             print(f"Test reconstruction grid saved → {vis_path}")
 

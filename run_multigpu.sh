@@ -39,7 +39,7 @@ NUM_VAL_DIFF="${NUM_VAL_DIFF:-30}"
 # Artefact retention. Without a cap these runs write ~200 periodic .pth per
 # trainer and ~1000 validation PNGs. Only the newest N of each are kept;
 # best.pth and final.pth are never pruned.
-KEEP_CKPTS="${KEEP_CKPTS:-10}"
+KEEP_CKPTS="${KEEP_CKPTS:-20}"
 KEEP_VIS="${KEEP_VIS:-20}"
 
 # Budgets.
@@ -103,6 +103,7 @@ else
         --val_every        200 \
         --num_val_cases    "$NUM_VAL_VAE" \
         --keep_checkpoints "$KEEP_CKPTS" \
+        --keep_vis         "$KEEP_VIS" \
         --early_stop_patience 25 \
         --device           cuda
     IMAGE_VAE_CKPT=$(_resolve_ckpt "image_vae_*")

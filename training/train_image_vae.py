@@ -93,9 +93,14 @@ def parse_args() -> argparse.Namespace:
     # Logging / checkpointing
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--ckpt_every", type=int, default=1000)
-    parser.add_argument("--keep_checkpoints", type=int, default=10,
+    parser.add_argument("--keep_checkpoints", type=int, default=20,
                         help="Rolling window of periodic step_*.pth files to keep. "
                              "best.pth and final.pth are never pruned. 0 disables.")
+    parser.add_argument("--vis_every", type=int, default=1000,
+                        help="Save a reconstruction grid every N steps. 0 disables.")
+    parser.add_argument("--keep_vis", type=int, default=20,
+                        help="Rolling window of periodic reconstruction PNGs to keep. "
+                             "0 disables.")
     parser.add_argument("--val_every", type=int, default=200,
                         help="Run SSIM/PSNR validation every N steps")
     parser.add_argument("--num_val_cases", type=int, default=5)
@@ -401,6 +406,10 @@ def main() -> None:
     logger = RunLogger(run_id=run_id, stage=STAGE, config=vars(args))
     checkpoint_dir = Path(args.checkpoint_dir) / run_id
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    # Alongside the checkpoints, so collect_results.sh picks these up —
+    # it looks for <ckpt_dir>/visualisations, not the logs directory.
+    vis_dir = checkpoint_dir / "visualisations"
+    vis_dir.mkdir(exist_ok=True)
 
     steps_per_epoch = len(loader)
     start_epoch = start_step // max(1, steps_per_epoch)
@@ -529,6 +538,16 @@ def main() -> None:
                 }, ckpt_path)
                 prune_oldest(checkpoint_dir, "step_*.pth", args.keep_checkpoints)
 
+            if args.vis_every > 0 and step % args.vis_every == 0 \
+                    and step > start_step and val_cases:
+                # First few val cases only — the grid is one row per case.
+                save_recon_visualisation(
+                    vae, val_cases[:args.num_test_vis_cases], device,
+                    vis_dir / f"recon_step_{step:07d}.png",
+                )
+                prune_oldest(vis_dir, "recon_step_*.png", args.keep_vis)
+                vae.train()
+
             step += 1
             pbar.update(1)
 
@@ -553,7 +572,7 @@ def main() -> None:
     # --- Test evaluation: reconstruction visualisation on held-out test cases ---
     if test_cases:
         print("\nRunning reconstruction visualisation on test set...")
-        vis_path = logger.run_dir / "vis" / "test_recon_final.png"
+        vis_path = vis_dir / "test_recon_final.png"
         save_recon_visualisation(vae, test_cases, device, vis_path)
         print(f"Test reconstruction grid saved → {vis_path}")
     else:
