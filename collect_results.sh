@@ -16,7 +16,7 @@ set -euo pipefail
 
 CKPT_DIR="${CKPT_DIR:-checkpoints}"
 LOGS_DIR="logs"
-EVAL_DIR="eval_output/missing_modality"
+EVAL_DIR="${EVAL_DIR:-eval_output/latent_diffusion}"
 SPLITS_DIR="${SPLITS_DIR:-splits/brats_roi128_full}"
 
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -98,9 +98,9 @@ banner "4 — Evaluation results"
 if [ -d "$EVAL_DIR" ]; then
     mkdir -p "$OUT/eval"
     cp -r "$EVAL_DIR"/. "$OUT/eval/"
-    ok "eval/ (metrics_full.csv, summary.csv, summary_table.txt)"
+    ok "eval/ (per-combo CSVs, summary table, prediction PNGs)"
 else
-    warn "No eval output found at ${EVAL_DIR} — run eval/infer_latent.py first"
+    warn "No eval output found at ${EVAL_DIR} — run step 8 first"
 fi
 
 # ─── 5. Data splits ─────────────────────────────────────────
