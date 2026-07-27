@@ -205,7 +205,7 @@ def ddim_sample(
     # e.g. [999, 979, ..., 19, 0]  (inclusive of 0)
     ts  = list(reversed(range(0, T, gap)))
 
-    x_t = torch.randn(latent_shape, device=device)
+    x_t = torch.randn(latent_shape, device=device, dtype=torch.float16)
     ab  = schedule.alpha_bars  # (T,)
 
     for i, t_curr in enumerate(ts):
@@ -263,9 +263,9 @@ def run_val(
             vol.transpose(3, 0, 1, 2).astype(np.float32)
         ).unsqueeze(0).to(device)                        # (1,4,128,128,128)
 
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
-            with torch.no_grad():
-                mu_img, _ = image_vae.encode(vol_t)      # (1, embed_dim, 32, 32, 32)
+        # with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+        with torch.no_grad():
+            mu_img, _ = image_vae.encode(vol_t)      # (1, embed_dim, 32, 32, 32)
 
         z0 = ddim_sample(
             unet, schedule, mu_img,
@@ -274,10 +274,10 @@ def run_val(
             n_steps=n_inf_steps,
         )
 
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
-            with torch.no_grad():
-                logits = mask_vae.decode(z0.to(mask_vae.pre_decode.weight.dtype
-                                               if hasattr(mask_vae, "pre_decode") else z0.dtype))
+        # with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+        with torch.no_grad():
+            logits = mask_vae.decode(z0.to(mask_vae.pre_decode.weight.dtype
+                                            if hasattr(mask_vae, "pre_decode") else z0.dtype))
         pred = logits.sigmoid().squeeze(0).cpu().numpy()  # (C, H, W, D)
 
         if subregion:
@@ -345,17 +345,17 @@ def save_vis(
         gt_regions = seg_to_regions(seg)
 
         vol_t = torch.from_numpy(vol).unsqueeze(0).to(device)
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
-            with torch.no_grad():
-                mu_img, _ = image_vae.encode(vol_t)
+        # with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+        with torch.no_grad():
+            mu_img, _ = image_vae.encode(vol_t)
 
         z0 = ddim_sample(unet, schedule, mu_img,
                          latent_shape=(1, mask_vae.latent_channels, *mu_img.shape[2:]),
                          device=device, n_steps=n_inf_steps)
 
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
-            with torch.no_grad():
-                logits = mask_vae.decode(z0)
+        # with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+        with torch.no_grad():
+            logits = mask_vae.decode(z0)
         pred = logits.sigmoid().squeeze(0).cpu().numpy()
         if subregion:
             pred_regions = subregions_to_regions(pred)
@@ -491,12 +491,12 @@ def main() -> None:
             vol_masked = apply_modality_mask(vol, mod_mask)
 
             unet.train()
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+            # with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
                 # On-the-fly ImageVAE encoding (frozen)
-                with torch.no_grad():
-                    mu_img, _ = image_vae.encode(vol_masked)   # (B, embed_dim, 32, 32, 32)
+            with torch.no_grad():
+                mu_img, _ = image_vae.encode(vol_masked)   # (B, embed_dim, 32, 32, 32)
 
-                loss = diffusion_loss(unet, schedule, z_mask, mu_img)
+            loss = diffusion_loss(unet, schedule, z_mask, mu_img)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()

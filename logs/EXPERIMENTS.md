@@ -24,3 +24,5 @@ Master index of training runs. One line per run, appended automatically via `Run
 | 2026-07-16 | mask_vae_20260715_230345 | mask_vae | Mask VAE, 50 epochs (4350 steps), latent=4ch, channels=32,64,128, beta=0.01, final_recon=0.1009 |
 | 2026-07-17 | latent_diffusion_20260717_223755 | latent_diffusion | latent diffusion, 10 steps, best_dice=0.0438, unet=2.2M, embed=256, subregion=False |
 | 2026-07-17 | latent_diffusion_20260717_223943 | latent_diffusion | latent diffusion, 100 steps, best_dice=0.0500, unet=2.2M, embed=256, subregion=False |
+| 2026-07-23 | image_vae_20260723_120952 | image_vae | Image VAE, 200 epochs (11200 steps), channels=64,128,256, res_units=2, beta=0.0001, final_recon=148.7451 |
+| 2026-07-25 | mask_vae_20260723_183146 | mask_vae | Mask VAE, 200 epochs (11200 steps), latent=4ch, channels=32,64,128, beta=0.01, final_recon=0.1850 |

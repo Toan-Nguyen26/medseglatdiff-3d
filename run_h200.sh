@@ -8,7 +8,7 @@
 #  Usage:
 #    bash run_h200.sh
 # ============================================================
-export BATCH_VAE=8     # A100 default: 4
+export BATCH_VAE=32     # A100 default: 4
 export BATCH_DIFF=64   # A100 default: 32
 
 exec bash "$(dirname "$0")/run_a100.sh" "$@"
