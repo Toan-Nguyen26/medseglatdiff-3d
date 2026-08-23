@@ -40,3 +40,4 @@ results_*.zip
 *.tar
 *.tar.gz
 *.pth
+data/smoke/
