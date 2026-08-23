@@ -24,6 +24,10 @@ DEVICE="${DEVICE:-cuda}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 BATCH_VAE="${BATCH_VAE:-4}"       # increase to 8 on H200
 BATCH_DIFF="${BATCH_DIFF:-32}"    # increase to 64 on H200
+# Validation set size. The old default of 4 made val metrics pure sampling
+# noise — mean_dice swung 0.36↔0.66 between checks on an otherwise flat model.
+NUM_VAL_VAE="${NUM_VAL_VAE:-50}"    # VAEs: one forward pass per case, cheap
+NUM_VAL_DIFF="${NUM_VAL_DIFF:-30}"  # diffusion: N × DDIM steps per case
 # # ─── ENV SETUP ──────────────────────────────────────────────
 # ENV_NAME="medseg"
 # CUDA_WHEEL="cu124"    # change to cu118 / cu121 if needed for your driver
@@ -69,6 +73,17 @@ HF_2024="https://huggingface.co/tom-ngh/brats-data/resolve/main/brats2024.tar"
 _latest_ckpt() {
     # $1 = glob pattern, $2 = filename (best.pth / final.pth)
     ls -t "$CKPT_DIR"/$1/"$2" 2>/dev/null | head -1 || true
+}
+
+_resolve_ckpt() {
+    # $1 = glob pattern. Prefer best.pth; fall back to final.pth.
+    # best.pth is the highest-scoring validation snapshot; final.pth is
+    # just the last state, which after early stopping is `patience`
+    # validations past the peak.
+    local found
+    found=$(_latest_ckpt "$1" "best.pth")
+    [ -n "$found" ] || found=$(_latest_ckpt "$1" "final.pth")
+    echo "$found"
 }
 
 banner() { echo ""; echo "════════════════════════════════════════════"; echo "  $*"; echo "════════════════════════════════════════════"; }
@@ -146,7 +161,7 @@ fi
 # # ════════════════════════════════════════════════════════════
 # banner "Step 4 — Train ImageVAE  (4× compression, 128→32)"
 # # ════════════════════════════════════════════════════════════
-IMAGE_VAE_CKPT=$(_latest_ckpt "image_vae_*" "final.pth")
+IMAGE_VAE_CKPT=$(_resolve_ckpt "image_vae_*")
 # if [ -z "$IMAGE_VAE_CKPT" ]; then
 #     python3 -m training.train_image_vae  \
 #         --data_root        "$DATA_PROC" \
@@ -168,7 +183,7 @@ IMAGE_VAE_CKPT=$(_latest_ckpt "image_vae_*" "final.pth")
 # # ════════════════════════════════════════════════════════════
 # banner "Step 5 — Train MaskVAE  (4× compression, subregion mode)"
 # # ════════════════════════════════════════════════════════════
-MASK_VAE_CKPT=$(_latest_ckpt "mask_vae_*" "best.pth")
+MASK_VAE_CKPT=$(_resolve_ckpt "mask_vae_*")
 # if [ -z "$MASK_VAE_CKPT" ]; then
 #     python3 -m training.train_mask_vae \
 #         --data_root          "$DATA_PROC" \
@@ -184,7 +199,7 @@ MASK_VAE_CKPT=$(_latest_ckpt "mask_vae_*" "best.pth")
 #         --early_stop_patience 25 \
 #         --device             "$DEVICE" \
 #         --subregion_mode
-#     MASK_VAE_CKPT=$(_latest_ckpt "mask_vae_*" "best.pth")
+#     MASK_VAE_CKPT=$(_resolve_ckpt "mask_vae_*")
 # else
 #     echo "[5] Found MaskVAE checkpoint — skipping  ($MASK_VAE_CKPT)"
 # fi
@@ -217,7 +232,7 @@ MASK_VAE_CKPT=$(_latest_ckpt "mask_vae_*" "best.pth")
 # ════════════════════════════════════════════════════════════
 banner "Step 7 — Train latent diffusion UNet"
 # ════════════════════════════════════════════════════════════
-DIFF_CKPT=$(_latest_ckpt "latent_diffusion_*" "best.pth")
+DIFF_CKPT=$(_resolve_ckpt "latent_diffusion_*")
 if [ -z "$DIFF_CKPT" ]; then
     python3 -m training.train_latent_diffusion \
         --latent_dir     "$LATENT_DIR" \
@@ -229,8 +244,9 @@ if [ -z "$DIFF_CKPT" ]; then
         --num_steps      200000 \
         --batch_size     "$BATCH_DIFF" \
         --num_workers    "$NUM_WORKERS" \
+        --num_val_cases  "$NUM_VAL_DIFF" \
         --device         "$DEVICE"
-    DIFF_CKPT=$(_latest_ckpt "latent_diffusion_*" "best.pth")
+    DIFF_CKPT=$(_resolve_ckpt "latent_diffusion_*")
 else
     echo "[7] Found diffusion checkpoint — skipping  ($DIFF_CKPT)"
 fi
