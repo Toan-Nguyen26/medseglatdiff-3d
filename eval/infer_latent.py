@@ -238,6 +238,11 @@ def infer_n_samples(
     """
     with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
         mu_img, _ = image_vae.encode(vol)   # (1, embed_dim, 32, 32, 32)
+    # Back to fp32 before leaving the autocast block. ddim_sample runs the
+    # UNet outside autocast, so a bf16 condition would meet fp32 weights and
+    # raise "Input type (c10::BFloat16) and bias type (float) should be the
+    # same". Only bites when use_amp is true, i.e. on CUDA.
+    mu_img = mu_img.float()
 
     latent_shape = (1, mask_vae.latent_channels, *mu_img.shape[2:])
     samples = []
@@ -247,7 +252,8 @@ def infer_n_samples(
                          device=device, n_steps=n_inf_steps)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
             logits = mask_vae.decode(z0)
-        pred = logits.sigmoid().squeeze(0).cpu().numpy()  # (C, H, W, D)
+        # .float() before .numpy(): NumPy has no bfloat16 dtype.
+        pred = logits.float().sigmoid().squeeze(0).cpu().numpy()  # (C, H, W, D)
 
         if subregion:
             pred_regions = subregions_to_regions(pred)    # (3, H, W, D)
