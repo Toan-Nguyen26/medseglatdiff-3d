@@ -123,17 +123,67 @@ else
     echo "    COMBO_SET=focused for the 7-combo set, ALL_COMBOS=1 for all 15."
 fi
 
-python3 -m eval.infer_latent \
-    --diffusion_ckpt      "$DIFF_CKPT" \
-    --image_vae_ckpt      "$IMAGE_VAE_CKPT" \
-    --mask_vae_ckpt       "$MASK_VAE_CKPT" \
-    --data_root           "$PROC_DIR" \
-    --splits_dir          "$SPLITS_DIR" \
-    --output_dir          "$OUT_DIR" \
-    --n_samples           "$N_SAMPLES" \
-    --num_inference_steps "$INFER_STEPS" \
-    "${COMBO_FLAG[@]}" \
-    --device              "$DEVICE"
+_run_shard() {   # $1 = shard index, $2 = num shards, $3 = output dir
+    python3 -m eval.infer_latent \
+        --diffusion_ckpt      "$DIFF_CKPT" \
+        --image_vae_ckpt      "$IMAGE_VAE_CKPT" \
+        --mask_vae_ckpt       "$MASK_VAE_CKPT" \
+        --data_root           "$PROC_DIR" \
+        --splits_dir          "$SPLITS_DIR" \
+        --output_dir          "$3" \
+        --n_samples           "$N_SAMPLES" \
+        --num_inference_steps "$INFER_STEPS" \
+        --num_shards          "$2" \
+        --shard_index         "$1" \
+        "${COMBO_FLAG[@]}" \
+        --device              "$DEVICE"
+}
+
+# How many GPUs to spread the cases over. Every (case, combo) is independent,
+# so this is one process per GPU with no communication — not DDP.
+if [ "$DEVICE" = "cuda" ]; then
+    DETECTED=$(python3 -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null || echo 1)
+else
+    DETECTED=1
+fi
+NUM_GPUS="${NUM_GPUS:-$DETECTED}"
+
+if [ "$NUM_GPUS" -le 1 ]; then
+    echo "[4] Single process (NUM_GPUS=$NUM_GPUS)"
+    _run_shard 0 1 "$OUT_DIR"
+else
+    echo "[4] Sharding cases across $NUM_GPUS GPUs"
+    SHARD_DIRS=()
+    PIDS=()
+    for ((g = 0; g < NUM_GPUS; g++)); do
+        SDIR="${OUT_DIR}/shard${g}"
+        SHARD_DIRS+=("$SDIR")
+        mkdir -p "$SDIR"
+        echo "    GPU $g → $SDIR"
+        CUDA_VISIBLE_DEVICES="$g" _run_shard "$g" "$NUM_GPUS" "$SDIR" \
+            > "$SDIR/log.txt" 2>&1 &
+        PIDS+=("$!")
+    done
+
+    # Wait on each explicitly so one shard crashing fails the whole run
+    # instead of silently producing a partial table.
+    FAILED=0
+    for i in "${!PIDS[@]}"; do
+        if wait "${PIDS[$i]}"; then
+            echo "    shard $i done"
+        else
+            echo "    shard $i FAILED — see ${SHARD_DIRS[$i]}/log.txt"
+            tail -20 "${SHARD_DIRS[$i]}/log.txt" | sed 's|^|      |'
+            FAILED=1
+        fi
+    done
+    [ "$FAILED" -eq 0 ] || { echo "[4] A shard failed — not merging."; exit 1; }
+
+    echo "[4] Merging shards"
+    python3 scripts/merge_shards.py \
+        --shard_dirs "${SHARD_DIRS[@]}" \
+        --output_dir "$OUT_DIR"
+fi
 
 # ════════════════════════════════════════════════════════════
 banner "Step 5 — Package results"

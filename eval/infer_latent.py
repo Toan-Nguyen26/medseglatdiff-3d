@@ -109,6 +109,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--combo_set", choices=["focused"], default=None,
                    help="Sweep a named subset instead of all 15. 'focused' is 7 "
                         "combos spanning 4/3/2/1 modalities — see FOCUSED_COMBOS.")
+    p.add_argument("--num_shards", type=int, default=1,
+                   help="Split the case list across N processes (one per GPU). "
+                        "Merge the results with scripts/merge_shards.py.")
+    p.add_argument("--shard_index", type=int, default=0,
+                   help="Which shard this process handles, 0-based.")
     p.add_argument("--num_vis_cases", type=int, default=3,
                    help="Cases to draw a combo grid for (rows = modality "
                         "combos, columns = sampling seeds). 0 disables.")
@@ -758,6 +763,17 @@ def main() -> None:
     all_names = _read_names(splits_dir / args.test_split_file)
     if args.num_cases:
         all_names = all_names[:args.num_cases]
+
+    # Shard by case for multi-GPU runs. Every (case, combo) is independent, so
+    # one process per GPU over a stride-slice of the cases needs no
+    # communication — merge_shards.py stitches the CSVs afterwards. Striding
+    # rather than splitting into blocks keeps the shards balanced even when
+    # the case count does not divide evenly.
+    if args.num_shards > 1:
+        total = len(all_names)
+        all_names = all_names[args.shard_index::args.num_shards]
+        print(f"\nShard {args.shard_index + 1}/{args.num_shards}: "
+              f"{len(all_names)} of {total} cases")
 
     print(f"\nTest cases : {len(all_names)}")
     print(f"N samples  : {args.n_samples}")
