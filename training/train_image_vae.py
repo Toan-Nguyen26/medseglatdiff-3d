@@ -46,7 +46,12 @@ from models.multiencoder.encoders import ImageVAE, vae_loss
 from utils.run_logger import RunLogger, new_run_id, set_seed
 
 STAGE = "image_vae"
-MODALITY_NAMES = ["T1", "T1ce", "T2", "FLAIR"]
+# Must match the channel order written by preprocess_brats.py
+# (MODALITY_SUFFIXES = t2f, t1c, t1n, t2w). This was previously
+# ["T1","T1ce","T2","FLAIR"], which mislabelled every reconstruction grid and
+# every per-modality SSIM/PSNR column: the channel reported as "FLAIR" was
+# really T2, and the one reported as "T1" was really FLAIR.
+MODALITY_NAMES = ["FLAIR", "T1ce", "T1", "T2"]
 
 
 def parse_args() -> argparse.Namespace:

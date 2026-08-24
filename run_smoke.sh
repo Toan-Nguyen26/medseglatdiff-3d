@@ -22,7 +22,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
-NUM_CASES="${NUM_CASES:-6}"
+NUM_CASES="${NUM_CASES:-10}"
 DATASET="${DATASET:-brats2023}"
 DEVICE="${DEVICE:-$(python3 -c 'import torch; print("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")')}"
 
@@ -38,9 +38,10 @@ IMAGE_VAE_CKPT="${IMAGE_VAE_CKPT:-$CKPT_SRC/image_vae/final.pth}"
 MASK_VAE_CKPT="${MASK_VAE_CKPT:-$CKPT_SRC/mask_vae/best.pth}"
 DIFF_CKPT="${DIFF_CKPT:-$CKPT_SRC/latent_diffusion/step_150000.pth}"
 
-# Deliberately tiny — this is a crash test, not an evaluation.
-N_SAMPLES="${N_SAMPLES:-2}"
-INFER_STEPS="${INFER_STEPS:-10}"
+# Measured: runtime is ~linear in INFER_STEPS, which is ~89% of the cost at
+# 50 steps. 10 cases x 7 combos x 5 samples x 50 steps is ~20 min on a T4.
+N_SAMPLES="${N_SAMPLES:-5}"
+INFER_STEPS="${INFER_STEPS:-50}"
 
 banner() { echo ""; echo "════════════════════════════════════════════"; echo "  $*"; echo "════════════════════════════════════════════"; }
 
@@ -114,8 +115,12 @@ COMBO_FLAG=(--modality_mask all)
 if [ "${ALL_COMBOS:-0}" = "1" ]; then
     COMBO_FLAG=(--all_combos)
     echo "[4] Sweeping all 15 modality combinations"
+elif [ -n "${COMBO_SET:-}" ]; then
+    COMBO_FLAG=(--combo_set "$COMBO_SET")
+    echo "[4] Combo set: $COMBO_SET"
 else
-    echo "[4] Single combo (all modalities present). ALL_COMBOS=1 to sweep."
+    echo "[4] Single combo (all modalities present)."
+    echo "    COMBO_SET=focused for the 7-combo set, ALL_COMBOS=1 for all 15."
 fi
 
 python3 -m eval.infer_latent \
@@ -131,10 +136,21 @@ python3 -m eval.infer_latent \
     --device              "$DEVICE"
 
 # ════════════════════════════════════════════════════════════
+banner "Step 5 — Package results"
+# ════════════════════════════════════════════════════════════
+# One file to grab from Kaggle's Output tab instead of clicking through
+# a directory tree of PNGs.
+ZIP_PATH="${ZIP_PATH:-$OUT_DIR/../smoke_results.zip}"
+rm -f "$ZIP_PATH"
+( cd "$(dirname "$OUT_DIR")" && zip -qr "$(basename "$ZIP_PATH")" "$(basename "$OUT_DIR")" )
+echo "  $(du -h "$ZIP_PATH" | cut -f1)  →  $ZIP_PATH"
+
+# ════════════════════════════════════════════════════════════
 banner "Smoke test passed"
 # ════════════════════════════════════════════════════════════
 echo "  Output → $OUT_DIR"
 ls -1 "$OUT_DIR" 2>/dev/null | sed 's|^|    |'
+echo "  Zip    → $ZIP_PATH"
 echo ""
 echo "  The pipeline runs end to end. The Dice numbers above are NOT valid"
 echo "  results — these cases were almost certainly in the training set."

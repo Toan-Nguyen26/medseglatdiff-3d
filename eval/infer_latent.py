@@ -57,6 +57,23 @@ from models.multiencoder.encoders import ImageVAE, MaskVAE
 MODALITY_NAMES = ["FLAIR", "T1ce", "T1", "T2"]
 REGION_NAMES   = ["WT", "TC", "ET"]
 
+# A 7-combo subset spanning 4 / 3 / 2 / 1 available modalities, for when the
+# full 15-combo sweep is too slow to iterate on. Bit order matches
+# MODALITY_NAMES above, i.e. (FLAIR, T1ce, T1, T2).
+#
+# It deliberately includes both "drop T1ce" and "drop T1", and both singles,
+# so the data settles which of the two actually carries more signal rather
+# than assuming it.
+FOCUSED_COMBOS: list[tuple[tuple[bool, ...], str]] = [
+    ((True,  True,  True,  True ), "all four — ceiling"),
+    ((True,  False, True,  True ), "drop T1ce — lose contrast enhancement"),
+    ((True,  True,  False, True ), "drop T1"),
+    ((True,  True,  False, False), "FLAIR + T1ce only"),
+    ((False, True,  False, False), "T1ce alone"),
+    ((False, False, True,  False), "T1 alone"),
+    ((False, False, False, True ), "T2 alone"),
+]
+
 
 # ---------------------------------------------------------------------------
 # Args
@@ -89,6 +106,9 @@ def parse_args() -> argparse.Namespace:
                    help="'all' = all present | '1101' = specific combo | 'random'.")
     p.add_argument("--all_combos", action="store_true",
                    help="Sweep all 15 modality combinations and write summary table.")
+    p.add_argument("--combo_set", choices=["focused"], default=None,
+                   help="Sweep a named subset instead of all 15. 'focused' is 7 "
+                        "combos spanning 4/3/2/1 modalities — see FOCUSED_COMBOS.")
 
     p.add_argument("--output_dir", default="eval_output/latent_diffusion")
     p.add_argument("--device",
@@ -382,7 +402,9 @@ def save_vis(
                              figsize=(n_cols * 2.0, n_rows * 2.4),
                              squeeze=False)
 
-    mod_str = "".join(m[0] for m, p in zip(MODALITY_NAMES, mod_present) if p)
+    # Full names, not initials: "FTTT" was unreadable — three of the four
+    # modalities start with T.
+    mod_str = "+".join(m for m, p in zip(MODALITY_NAMES, mod_present) if p) or "none"
     d_str   = "  ".join(
         f"{r}:{metrics[f'{r}_dice']:.3f}" for r in REGION_NAMES
     )
@@ -401,9 +423,15 @@ def save_vis(
 
         # FLAIR
         axes[row][col].imshow(flair_n, cmap="gray")
-        axes[row][col].set_ylabel(rname, fontsize=9)
+        axes[row][col].set_ylabel(rname, fontsize=10, fontweight="bold")
         axes[row][col].set_title("FLAIR" if row == 0 else "", fontsize=7)
-        axes[row][col].axis("off")
+        # Not axis("off") — that hides the ylabel too, which is what made the
+        # three rows look like duplicates. Drop the ticks and frame instead so
+        # the WT / TC / ET label survives.
+        axes[row][col].set_xticks([])
+        axes[row][col].set_yticks([])
+        for spine in axes[row][col].spines.values():
+            spine.set_visible(False)
         col += 1
 
         # GT (colour-coded tumour map, same for each row)
@@ -489,7 +517,7 @@ def print_summary_table(summary: list[dict], output_dir: Path) -> None:
     overall_dice = np.mean([r["mean_dice"] for r in summary])
     overall_ged  = np.mean([r["mean_ged"]  for r in summary])
     lines.append(
-        f"{'ALL':<6}  {'(mean over 15 combos)':<22}"
+        f"{'ALL':<6}  {f'(mean over {len(summary)} combos)':<22}"
         + " " * (col_w * 6 + 12)
         + f"  {overall_dice:>{col_w}.3f}  {overall_ged:>{col_w}.3f}"
     )
@@ -592,13 +620,24 @@ def main() -> None:
     print(f"DDIM steps : {args.num_inference_steps}")
     print(f"Output     : {output_dir}\n")
 
-    if args.all_combos:
-        # ── Sweep all 15 modality combinations ──────────────────────────────
+    if args.all_combos or args.combo_set:
+        # ── Sweep a set of modality combinations ────────────────────────────
         from tqdm import tqdm
         all_rows: list[dict] = []
         summary:  list[dict] = []
 
-        for combo in tqdm(ALL_MODALITY_COMBINATIONS, desc="Combos"):
+        if args.combo_set == "focused":
+            combo_list = [c for c, _ in FOCUSED_COMBOS]
+            print(f"\nCombo set 'focused' ({len(combo_list)} of 15):")
+            for combo, why in FOCUSED_COMBOS:
+                bits  = "".join("1" if c else "0" for c in combo)
+                label = "+".join(m for m, c in zip(MODALITY_NAMES, combo) if c)
+                print(f"  {bits}  {label:<22}  {why}")
+            print()
+        else:
+            combo_list = ALL_MODALITY_COMBINATIONS
+
+        for combo in tqdm(combo_list, desc="Combos"):
             combo_str = "".join("1" if c else "0" for c in combo)
             mod_label = "+".join(m for m, c in zip(MODALITY_NAMES, combo) if c)
             mod_t     = torch.tensor([list(combo)], dtype=torch.bool).to(device)
