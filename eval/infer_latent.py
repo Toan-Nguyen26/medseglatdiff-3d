@@ -57,6 +57,23 @@ from models.multiencoder.encoders import ImageVAE, MaskVAE
 MODALITY_NAMES = ["FLAIR", "T1ce", "T1", "T2"]
 REGION_NAMES   = ["WT", "TC", "ET"]
 
+# A 7-combo subset spanning 4 / 3 / 2 / 1 available modalities, for when the
+# full 15-combo sweep is too slow to iterate on. Bit order matches
+# MODALITY_NAMES above, i.e. (FLAIR, T1ce, T1, T2).
+#
+# It deliberately includes both "drop T1ce" and "drop T1", and both singles,
+# so the data settles which of the two actually carries more signal rather
+# than assuming it.
+FOCUSED_COMBOS: list[tuple[tuple[bool, ...], str]] = [
+    ((True,  True,  True,  True ), "all four — ceiling"),
+    ((True,  False, True,  True ), "drop T1ce — lose contrast enhancement"),
+    ((True,  True,  False, True ), "drop T1"),
+    ((True,  True,  False, False), "FLAIR + T1ce only"),
+    ((False, True,  False, False), "T1ce alone"),
+    ((False, False, True,  False), "T1 alone"),
+    ((False, False, False, True ), "T2 alone"),
+]
+
 
 # ---------------------------------------------------------------------------
 # Args
@@ -89,6 +106,20 @@ def parse_args() -> argparse.Namespace:
                    help="'all' = all present | '1101' = specific combo | 'random'.")
     p.add_argument("--all_combos", action="store_true",
                    help="Sweep all 15 modality combinations and write summary table.")
+    p.add_argument("--combo_set", choices=["focused"], default=None,
+                   help="Sweep a named subset instead of all 15. 'focused' is 7 "
+                        "combos spanning 4/3/2/1 modalities — see FOCUSED_COMBOS.")
+    p.add_argument("--num_shards", type=int, default=1,
+                   help="Split the case list across N processes (one per GPU). "
+                        "Merge the results with scripts/merge_shards.py.")
+    p.add_argument("--shard_index", type=int, default=0,
+                   help="Which shard this process handles, 0-based.")
+    p.add_argument("--num_vis_cases", type=int, default=3,
+                   help="Cases to draw a combo grid for (rows = modality "
+                        "combos, columns = sampling seeds). 0 disables.")
+    p.add_argument("--vis_per_combo", action="store_true",
+                   help="Also write the per-(case, combo) region figure. Off by "
+                        "default — it is one PNG per case per combo.")
 
     p.add_argument("--output_dir", default="eval_output/latent_diffusion")
     p.add_argument("--device",
@@ -357,6 +388,27 @@ def _regions_to_rgb(wt: np.ndarray, tc: np.ndarray, et: np.ndarray) -> np.ndarra
     return rgb
 
 
+def best_slice(gt_np: np.ndarray) -> int:
+    """
+    Index of the D-axis slice that best represents the ground truth.
+
+    Picking the slice with the largest whole-tumour area is the obvious
+    choice, but WT dwarfs ET — so the max-WT slice often contains no
+    enhancing tumour at all, and the ET panels come out empty.
+
+    Instead, score each slice on all three regions with each normalised by
+    its own maximum, so a slice that shows ET well is not outvoted by one
+    that merely has more oedema. The result is the slice where WT, TC and
+    ET are simultaneously best represented.
+
+    gt_np: (3, H, W, D) binary [WT, TC, ET]
+    """
+    areas = gt_np.sum(axis=(1, 2))                       # (3, D)
+    peak  = areas.max(axis=1, keepdims=True)             # (3, 1)
+    norm  = areas / np.maximum(peak, 1e-6)               # each region in [0,1]
+    return int(norm.sum(axis=0).argmax())
+
+
 def save_vis(
     vol_np:   np.ndarray,    # (4, H, W, D)
     gt_np:    np.ndarray,    # (3, H, W, D) [WT, TC, ET]
@@ -368,7 +420,7 @@ def save_vis(
 ) -> None:
     N = stack_np.shape[0]
     # Pick best tumour slice along last (D) axis
-    best_z = int(gt_np[0].sum(axis=(0, 1)).argmax())
+    best_z = best_slice(gt_np)
 
     # FLAIR background (channel 0)
     flair = vol_np[0, :, :, best_z]
@@ -382,7 +434,9 @@ def save_vis(
                              figsize=(n_cols * 2.0, n_rows * 2.4),
                              squeeze=False)
 
-    mod_str = "".join(m[0] for m, p in zip(MODALITY_NAMES, mod_present) if p)
+    # Full names, not initials: "FTTT" was unreadable — three of the four
+    # modalities start with T.
+    mod_str = "+".join(m for m, p in zip(MODALITY_NAMES, mod_present) if p) or "none"
     d_str   = "  ".join(
         f"{r}:{metrics[f'{r}_dice']:.3f}" for r in REGION_NAMES
     )
@@ -401,9 +455,15 @@ def save_vis(
 
         # FLAIR
         axes[row][col].imshow(flair_n, cmap="gray")
-        axes[row][col].set_ylabel(rname, fontsize=9)
+        axes[row][col].set_ylabel(rname, fontsize=10, fontweight="bold")
         axes[row][col].set_title("FLAIR" if row == 0 else "", fontsize=7)
-        axes[row][col].axis("off")
+        # Not axis("off") — that hides the ylabel too, which is what made the
+        # three rows look like duplicates. Drop the ticks and frame instead so
+        # the WT / TC / ET label survives.
+        axes[row][col].set_xticks([])
+        axes[row][col].set_yticks([])
+        for spine in axes[row][col].spines.values():
+            spine.set_visible(False)
         col += 1
 
         # GT (colour-coded tumour map, same for each row)
@@ -489,7 +549,7 @@ def print_summary_table(summary: list[dict], output_dir: Path) -> None:
     overall_dice = np.mean([r["mean_dice"] for r in summary])
     overall_ged  = np.mean([r["mean_ged"]  for r in summary])
     lines.append(
-        f"{'ALL':<6}  {'(mean over 15 combos)':<22}"
+        f"{'ALL':<6}  {f'(mean over {len(summary)} combos)':<22}"
         + " " * (col_w * 6 + 12)
         + f"  {overall_dice:>{col_w}.3f}  {overall_ged:>{col_w}.3f}"
     )
@@ -511,6 +571,108 @@ def _read_names(path: str | Path) -> list[str]:
         return sorted(line.strip() for line in f if line.strip())
 
 
+def extract_slices(
+    vol_np:   np.ndarray,    # (4, H, W, D)
+    gt_np:    np.ndarray,    # (3, H, W, D)
+    stack_np: np.ndarray,    # (N, 3, H, W, D)
+    unc_np:   np.ndarray,    # (3, H, W, D)
+) -> dict:
+    """
+    Reduce one (case, combo) result to the 2D panels its figure row needs.
+
+    The full stack is ~125 MB per case-combo; these slices are under a
+    megabyte, so every combo's row can be held in memory until the whole
+    sweep finishes and the per-case figure can be drawn.
+    """
+    z = best_slice(gt_np)
+    flair = vol_np[0, :, :, z]
+    return {
+        "z":       z,
+        "flair":   (flair - flair.min()) / (flair.max() - flair.min() + 1e-6),
+        "gt":      _regions_to_rgb(gt_np[0, :, :, z], gt_np[1, :, :, z], gt_np[2, :, :, z]),
+        "samples": [
+            _regions_to_rgb(stack_np[s, 0, :, :, z],
+                            stack_np[s, 1, :, :, z],
+                            stack_np[s, 2, :, :, z])
+            for s in range(stack_np.shape[0])
+        ],
+        "ensemble": _regions_to_rgb(stack_np[:, 0, :, :, z].mean(0),
+                                    stack_np[:, 1, :, :, z].mean(0),
+                                    stack_np[:, 2, :, :, z].mean(0)),
+        # Mean across regions — one uncertainty panel per row, not three.
+        "unc":      unc_np[:, :, :, z].mean(axis=0),
+    }
+
+
+def save_combo_grid(
+    case_name: str,
+    panels:    list[tuple[str, dict, dict]],   # (label, slices, metrics) per combo
+    save_path: Path,
+) -> None:
+    """
+    One figure per case. Rows are modality combinations, ordered as given;
+    columns are FLAIR, ground truth, the N sampling seeds, the ensemble, and
+    uncertainty.
+
+    Every cell is the full RGB composite of all three regions, so
+    degradation as modalities are removed reads down the page and sample
+    diversity reads across it.
+    """
+    if not panels:
+        return
+
+    n_rows    = len(panels)
+    n_samples = len(panels[0][1]["samples"])
+    n_cols    = 2 + n_samples + 2      # FLAIR | GT | s1..sN | ensemble | unc
+
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(n_cols * 1.9, n_rows * 2.15),
+                             squeeze=False)
+
+    col_titles = (["FLAIR", "GT"]
+                  + [f"s{i+1}" for i in range(n_samples)]
+                  + ["ensemble", "uncertainty"])
+
+    for row, (label, sl, metrics) in enumerate(panels):
+        cells = ([("gray", sl["flair"]), ("rgb", sl["gt"])]
+                 + [("rgb", s) for s in sl["samples"]]
+                 + [("rgb", sl["ensemble"]), ("hot", sl["unc"])])
+
+        for col, (kind, img) in enumerate(cells):
+            ax = axes[row][col]
+            if kind == "gray":
+                ax.imshow(img, cmap="gray")
+            elif kind == "hot":
+                ax.imshow(img, cmap="hot", vmin=0.0, vmax=0.25)
+            else:
+                ax.imshow(img)
+
+            if row == 0:
+                ax.set_title(col_titles[col], fontsize=8)
+
+            # Ticks off but the frame kept, so row labels survive —
+            # ax.axis("off") would hide the ylabel too.
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+
+        axes[row][0].set_ylabel(
+            f"{label}\nDice {metrics['mean_dice']:.3f}",
+            fontsize=8, fontweight="bold",
+        )
+
+    fig.suptitle(
+        f"{case_name}   —   rows: available modalities (most to least)   "
+        f"|   columns: {n_samples} sampling seeds",
+        fontsize=10,
+    )
+    plt.tight_layout(rect=(0, 0, 1, 0.97))
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+
+
 def eval_combo(
     unet:       UNet3D,
     image_vae:  ImageVAE,
@@ -529,9 +691,17 @@ def eval_combo(
     output_dir:    Path,
     combo_str:     str,
     save_vis_flag: bool = True,
+    slice_sink:    dict | None = None,
+    slice_cases:   set[str] | None = None,
 ) -> list[dict]:
+    """
+    `slice_sink`, when given, collects the 2D panels needed for the per-case
+    combo grid: slice_sink[case_name] gets (label, slices, metrics) appended
+    for this combo. Only cases in `slice_cases` are collected.
+    """
     rows: list[dict] = []
     mod_present = [True] * 4 if mod_tensor is None else mod_tensor[0].cpu().tolist()
+    mod_label   = "+".join(m for m, p in zip(MODALITY_NAMES, mod_present) if p) or "none"
 
     for name in names:
         vol = np.load(vol_dir / f"{name}_vol.npy")   # (H,W,D,4)
@@ -553,11 +723,18 @@ def eval_combo(
 
         metrics = compute_metrics(stack_np, gt_np, unc_np)
 
+        vol_cf = vol.transpose(3, 0, 1, 2)   # (4,H,W,D)
+
         if save_vis_flag:
             vis_path = (output_dir / "vis"
                         / f"{combo_str}_{name[:16]}_n{n_samples}.png")
-            save_vis(vol.transpose(3, 0, 1, 2), gt_np,
-                     stack_np, unc_np, metrics, mod_present, vis_path)
+            save_vis(vol_cf, gt_np, stack_np, unc_np,
+                     metrics, mod_present, vis_path)
+
+        if slice_sink is not None and (slice_cases is None or name in slice_cases):
+            slice_sink.setdefault(name, []).append(
+                (mod_label, extract_slices(vol_cf, gt_np, stack_np, unc_np), metrics)
+            )
 
         row = {"case": name, "combo": combo_str,
                "n_samples": n_samples, **metrics}
@@ -587,18 +764,46 @@ def main() -> None:
     if args.num_cases:
         all_names = all_names[:args.num_cases]
 
+    # Shard by case for multi-GPU runs. Every (case, combo) is independent, so
+    # one process per GPU over a stride-slice of the cases needs no
+    # communication — merge_shards.py stitches the CSVs afterwards. Striding
+    # rather than splitting into blocks keeps the shards balanced even when
+    # the case count does not divide evenly.
+    if args.num_shards > 1:
+        total = len(all_names)
+        all_names = all_names[args.shard_index::args.num_shards]
+        print(f"\nShard {args.shard_index + 1}/{args.num_shards}: "
+              f"{len(all_names)} of {total} cases")
+
     print(f"\nTest cases : {len(all_names)}")
     print(f"N samples  : {args.n_samples}")
     print(f"DDIM steps : {args.num_inference_steps}")
     print(f"Output     : {output_dir}\n")
 
-    if args.all_combos:
-        # ── Sweep all 15 modality combinations ──────────────────────────────
+    if args.all_combos or args.combo_set:
+        # ── Sweep a set of modality combinations ────────────────────────────
         from tqdm import tqdm
         all_rows: list[dict] = []
         summary:  list[dict] = []
 
-        for combo in tqdm(ALL_MODALITY_COMBINATIONS, desc="Combos"):
+        if args.combo_set == "focused":
+            combo_list = [c for c, _ in FOCUSED_COMBOS]
+            print(f"\nCombo set 'focused' ({len(combo_list)} of 15):")
+            for combo, why in FOCUSED_COMBOS:
+                bits  = "".join("1" if c else "0" for c in combo)
+                label = "+".join(m for m, c in zip(MODALITY_NAMES, combo) if c)
+                print(f"  {bits}  {label:<22}  {why}")
+            print()
+        else:
+            combo_list = ALL_MODALITY_COMBINATIONS
+
+        # Panels for the per-case combo grid, filled in as the sweep runs.
+        # Combos are visited in order, so each case's rows come out ordered
+        # from most modalities to fewest.
+        slice_sink:  dict[str, list] = {}
+        slice_cases = set(all_names[:args.num_vis_cases]) if args.num_vis_cases > 0 else set()
+
+        for combo in tqdm(combo_list, desc="Combos"):
             combo_str = "".join("1" if c else "0" for c in combo)
             mod_label = "+".join(m for m, c in zip(MODALITY_NAMES, combo) if c)
             mod_t     = torch.tensor([list(combo)], dtype=torch.bool).to(device)
@@ -609,7 +814,9 @@ def main() -> None:
                 n_samples=args.n_samples, n_inf_steps=args.num_inference_steps,
                 device=device, subregion=subregion, use_amp=use_amp,
                 output_dir=output_dir, combo_str=combo_str,
-                save_vis_flag=True,
+                save_vis_flag=args.vis_per_combo,
+                slice_sink=slice_sink,
+                slice_cases=slice_cases,
             )
             all_rows.extend(rows)
 
@@ -649,6 +856,16 @@ def main() -> None:
         print_summary_table(summary, output_dir)
         print(f"\nFull CSV   → {full_csv}")
         print(f"Summary    → {summary_csv}")
+
+        # ── Per-case combo grids ────────────────────────────────────────────
+        if slice_sink:
+            grid_dir = output_dir / "combo_grids"
+            for case_name, panels in slice_sink.items():
+                save_combo_grid(
+                    case_name, panels,
+                    grid_dir / f"{case_name[:20]}_combos_n{args.n_samples}.png",
+                )
+            print(f"Combo grids→ {grid_dir}  ({len(slice_sink)} cases)")
 
     else:
         # ── Single combo ─────────────────────────────────────────────────────
