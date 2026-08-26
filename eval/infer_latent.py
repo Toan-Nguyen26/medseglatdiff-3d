@@ -114,6 +114,11 @@ def parse_args() -> argparse.Namespace:
                         "Merge the results with scripts/merge_shards.py.")
     p.add_argument("--shard_index", type=int, default=0,
                    help="Which shard this process handles, 0-based.")
+    p.add_argument("--regions", choices=["all", "wt"], default="all",
+                   help="'wt' reports whole tumour only — the standard binary "
+                        "setting for probabilistic segmentation, and the region "
+                        "where uncertainty is interpretable. The model still "
+                        "predicts all three; this filters metrics and figures.")
     p.add_argument("--num_vis_cases", type=int, default=3,
                    help="Cases to draw a combo grid for (rows = modality "
                         "combos, columns = sampling seeds). 0 disables.")
@@ -350,22 +355,38 @@ def compute_metrics(
     stack_np: np.ndarray,   # (N, 3, H, W, D) sigmoid probabilities
     gt_np:    np.ndarray,   # (3, H, W, D) binary float
     unc_np:   np.ndarray,   # (3, H, W, D) variance
+    regions:  list[str] | None = None,
 ) -> dict[str, float]:
+    regions = regions or REGION_NAMES
     results: dict[str, float] = {}
-    for r, name in enumerate(REGION_NAMES):
+    for name in regions:
+        r        = REGION_NAMES.index(name)
         gt       = gt_np[r]
         ensemble = stack_np[:, r].mean(axis=0)
         samples  = stack_np[:, r]
 
-        results[f"{name}_dice"]        = _dice(ensemble, gt)
-        results[f"{name}_iou"]         = _iou(ensemble, gt)
-        results[f"{name}_ged"]         = _ged(samples,  gt)
-        results[f"{name}_dmax"]        = _d_max(samples)
-        results[f"{name}_uncertainty"] = float(unc_np[r].mean())
+        results[f"{name}_dice"] = _dice(ensemble, gt)
+        results[f"{name}_iou"]  = _iou(ensemble, gt)
+        results[f"{name}_ged"]  = _ged(samples,  gt)
+        results[f"{name}_dmax"] = _d_max(samples)
 
-    for metric in ("dice", "iou", "ged", "dmax", "uncertainty"):
+        # Uncertainty averaged only where there is something to disagree
+        # about: the union of ground truth and anything any sample called
+        # foreground. Averaging over the whole volume instead makes the
+        # number scale with tumour size — ~95% of voxels are background
+        # where every sample agrees, so variance there is exactly 0. That
+        # made the score incomparable across cases, and across modality
+        # combos, since predicted tumour size changes with the input.
+        roi = (gt > 0.5) | (samples > 0.5).any(axis=0)
+        results[f"{name}_uncertainty"] = (
+            float(unc_np[r][roi].mean()) if roi.any() else 0.0
+        )
+        # The old whole-volume figure, kept so earlier runs stay comparable.
+        results[f"{name}_uncertainty_vol"] = float(unc_np[r].mean())
+
+    for metric in ("dice", "iou", "ged", "dmax", "uncertainty", "uncertainty_vol"):
         results[f"mean_{metric}"] = float(
-            np.mean([results[f"{r}_{metric}"] for r in REGION_NAMES])
+            np.mean([results[f"{r}_{metric}"] for r in regions])
         )
     return results
 
@@ -521,24 +542,27 @@ def save_vis(
 # Summary table printer
 # ---------------------------------------------------------------------------
 
-def print_summary_table(summary: list[dict], output_dir: Path) -> None:
+def print_summary_table(summary: list[dict], output_dir: Path,
+                        regions: list[str] | None = None) -> None:
+    regions = regions or REGION_NAMES
     col_w = 7
     lines = []
-    sep   = "-" * (30 + col_w * 8 + 16)
+    sep   = "-" * (30 + col_w * (2 * len(regions) + 2) + 16)
     lines.append(sep)
     lines.append(
         f"{'Combo':<6}  {'Modalities':<22}"
         + "".join(f"  {f'{r}_{m[:3]}':{col_w}}"
-                  for r in REGION_NAMES for m in ("dice", "ged"))
-        + f"  {'mean_d':>{col_w}}  {'mean_g':>{col_w}}"
+                  for r in regions for m in ("dice", "ged"))
+        + f"  {'unc':>{col_w}}  {'mean_d':>{col_w}}  {'mean_g':>{col_w}}"
     )
     lines.append(sep)
 
     for row in summary:
         vals = []
-        for r in REGION_NAMES:
+        for r in regions:
             vals.append(f"{row[f'{r}_dice']:>{col_w}.3f}")
             vals.append(f"{row[f'{r}_ged']:>{col_w}.3f}")
+        vals.append(f"{row.get('mean_uncertainty', 0.0):>{col_w}.4f}")
         vals.append(f"{row['mean_dice']:>{col_w}.3f}")
         vals.append(f"{row['mean_ged']:>{col_w}.3f}")
         lines.append(
@@ -548,9 +572,11 @@ def print_summary_table(summary: list[dict], output_dir: Path) -> None:
     lines.append(sep)
     overall_dice = np.mean([r["mean_dice"] for r in summary])
     overall_ged  = np.mean([r["mean_ged"]  for r in summary])
+    overall_unc  = np.mean([r.get("mean_uncertainty", 0.0) for r in summary])
     lines.append(
         f"{'ALL':<6}  {f'(mean over {len(summary)} combos)':<22}"
-        + " " * (col_w * 6 + 12)
+        + " " * ((col_w + 2) * 2 * len(regions))
+        + f"  {overall_unc:>{col_w}.4f}"
         + f"  {overall_dice:>{col_w}.3f}  {overall_ged:>{col_w}.3f}"
     )
     lines.append(sep)
@@ -576,6 +602,7 @@ def extract_slices(
     gt_np:    np.ndarray,    # (3, H, W, D)
     stack_np: np.ndarray,    # (N, 3, H, W, D)
     unc_np:   np.ndarray,    # (3, H, W, D)
+    regions:  list[str] | None = None,
 ) -> dict:
     """
     Reduce one (case, combo) result to the 2D panels its figure row needs.
@@ -584,23 +611,37 @@ def extract_slices(
     megabyte, so every combo's row can be held in memory until the whole
     sweep finishes and the per-case figure can be drawn.
     """
-    z = best_slice(gt_np)
-    flair = vol_np[0, :, :, z]
+    regions = regions or REGION_NAMES
+    wt_only = regions == ["WT"]
+    z       = best_slice(gt_np)
+    flair   = vol_np[0, :, :, z]
+
+    def rgb(wt, tc, et):
+        # In WT-only mode the composite would render TC and ET on top of WT
+        # and the panel would no longer show what is being scored.
+        return _regions_to_rgb(wt, np.zeros_like(wt), np.zeros_like(wt)) \
+            if wt_only else _regions_to_rgb(wt, tc, et)
+
+    # One region's variance, not the mean across all three: WT, TC and ET
+    # disagreement mean different things, and averaging them produced a
+    # panel that could not be read.
+    unc_idx = REGION_NAMES.index(regions[0])
+
     return {
         "z":       z,
         "flair":   (flair - flair.min()) / (flair.max() - flair.min() + 1e-6),
-        "gt":      _regions_to_rgb(gt_np[0, :, :, z], gt_np[1, :, :, z], gt_np[2, :, :, z]),
+        "gt_mask": gt_np[unc_idx, :, :, z],           # for the contour overlay
+        "gt":      rgb(gt_np[0, :, :, z], gt_np[1, :, :, z], gt_np[2, :, :, z]),
         "samples": [
-            _regions_to_rgb(stack_np[s, 0, :, :, z],
-                            stack_np[s, 1, :, :, z],
-                            stack_np[s, 2, :, :, z])
+            rgb(stack_np[s, 0, :, :, z],
+                stack_np[s, 1, :, :, z],
+                stack_np[s, 2, :, :, z])
             for s in range(stack_np.shape[0])
         ],
-        "ensemble": _regions_to_rgb(stack_np[:, 0, :, :, z].mean(0),
-                                    stack_np[:, 1, :, :, z].mean(0),
-                                    stack_np[:, 2, :, :, z].mean(0)),
-        # Mean across regions — one uncertainty panel per row, not three.
-        "unc":      unc_np[:, :, :, z].mean(axis=0),
+        "ensemble": rgb(stack_np[:, 0, :, :, z].mean(0),
+                        stack_np[:, 1, :, :, z].mean(0),
+                        stack_np[:, 2, :, :, z].mean(0)),
+        "unc":      unc_np[unc_idx, :, :, z],
     }
 
 
@@ -633,17 +674,35 @@ def save_combo_grid(
                   + [f"s{i+1}" for i in range(n_samples)]
                   + ["ensemble", "uncertainty"])
 
+    # One colour scale for every row, from the actual spread rather than the
+    # theoretical maximum of 0.25 — sample variance is bimodal (voxels either
+    # agree or split), so a fixed 0.25 ceiling saturated the map into a solid
+    # blob. The 99th percentile of non-zero values spans the real range.
+    nonzero = np.concatenate([sl["unc"][sl["unc"] > 0].ravel() for _, sl, _ in panels]
+                             or [np.array([1.0])])
+    unc_vmax = float(np.percentile(nonzero, 99)) if nonzero.size else 0.25
+    unc_vmax = max(unc_vmax, 1e-6)
+
     for row, (label, sl, metrics) in enumerate(panels):
         cells = ([("gray", sl["flair"]), ("rgb", sl["gt"])]
                  + [("rgb", s) for s in sl["samples"]]
-                 + [("rgb", sl["ensemble"]), ("hot", sl["unc"])])
+                 + [("rgb", sl["ensemble"]), ("unc", sl["unc"])])
 
         for col, (kind, img) in enumerate(cells):
             ax = axes[row][col]
             if kind == "gray":
                 ax.imshow(img, cmap="gray")
-            elif kind == "hot":
-                ax.imshow(img, cmap="hot", vmin=0.0, vmax=0.25)
+            elif kind == "unc":
+                # Anatomy underneath, uncertainty over it with alpha tied to
+                # the value, so confident voxels stay transparent instead of
+                # painting a black field that reads as "no data".
+                ax.imshow(sl["flair"], cmap="gray")
+                norm = np.clip(img / unc_vmax, 0.0, 1.0)
+                ax.imshow(norm, cmap="inferno", alpha=norm, vmin=0.0, vmax=1.0)
+                # GT outline, so "uncertainty sits on the boundary" is visible.
+                if sl["gt_mask"].any():
+                    ax.contour(sl["gt_mask"], levels=[0.5],
+                               colors="#39ff14", linewidths=0.5)
             else:
                 ax.imshow(img)
 
@@ -693,6 +752,7 @@ def eval_combo(
     save_vis_flag: bool = True,
     slice_sink:    dict | None = None,
     slice_cases:   set[str] | None = None,
+    regions:       list[str] | None = None,
 ) -> list[dict]:
     """
     `slice_sink`, when given, collects the 2D panels needed for the per-case
@@ -721,7 +781,7 @@ def eval_combo(
         )
         gt_np = seg_to_regions(seg)   # (3,H,W,D) [WT,TC,ET]
 
-        metrics = compute_metrics(stack_np, gt_np, unc_np)
+        metrics = compute_metrics(stack_np, gt_np, unc_np, regions)
 
         vol_cf = vol.transpose(3, 0, 1, 2)   # (4,H,W,D)
 
@@ -733,7 +793,7 @@ def eval_combo(
 
         if slice_sink is not None and (slice_cases is None or name in slice_cases):
             slice_sink.setdefault(name, []).append(
-                (mod_label, extract_slices(vol_cf, gt_np, stack_np, unc_np), metrics)
+                (mod_label, extract_slices(vol_cf, gt_np, stack_np, unc_np, regions), metrics)
             )
 
         row = {"case": name, "combo": combo_str,
@@ -759,6 +819,10 @@ def main() -> None:
     splits_dir = Path(args.splits_dir) if args.splits_dir else Path(args.data_root)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    regions = ["WT"] if args.regions == "wt" else REGION_NAMES
+    if args.regions == "wt":
+        print("\nRegions    : WT only (binary whole-tumour setting)")
 
     all_names = _read_names(splits_dir / args.test_split_file)
     if args.num_cases:
@@ -817,6 +881,7 @@ def main() -> None:
                 save_vis_flag=args.vis_per_combo,
                 slice_sink=slice_sink,
                 slice_cases=slice_cases,
+                regions=regions,
             )
             all_rows.extend(rows)
 
@@ -833,11 +898,10 @@ def main() -> None:
             })
 
             tqdm.write(
-                f"[{combo_str}] {mod_label:<22}  "
-                f"Dice WT={summary[-1]['WT_dice']:.3f} "
-                f"TC={summary[-1]['TC_dice']:.3f} "
-                f"ET={summary[-1]['ET_dice']:.3f}  "
-                f"mean={summary[-1]['mean_dice']:.3f}"
+                f"[{combo_str}] {mod_label:<22}  Dice "
+                + " ".join(f"{r}={summary[-1][f'{r}_dice']:.3f}" for r in regions)
+                + f"  unc={summary[-1]['mean_uncertainty']:.4f}"
+                + (f"  mean={summary[-1]['mean_dice']:.3f}" if len(regions) > 1 else "")
             )
 
         # Save CSVs
@@ -853,7 +917,7 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(summary)
 
-        print_summary_table(summary, output_dir)
+        print_summary_table(summary, output_dir, regions)
         print(f"\nFull CSV   → {full_csv}")
         print(f"Summary    → {summary_csv}")
 

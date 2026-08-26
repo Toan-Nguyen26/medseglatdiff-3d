@@ -42,6 +42,9 @@ DIFF_CKPT="${DIFF_CKPT:-$CKPT_SRC/latent_diffusion/step_150000.pth}"
 # 50 steps. 10 cases x 7 combos x 5 samples x 50 steps is ~20 min on a T4.
 N_SAMPLES="${N_SAMPLES:-5}"
 INFER_STEPS="${INFER_STEPS:-50}"
+# "wt" = whole tumour only: the standard binary setting for probabilistic
+# segmentation, and the region where uncertainty is interpretable.
+REGIONS="${REGIONS:-all}"
 
 banner() { echo ""; echo "════════════════════════════════════════════"; echo "  $*"; echo "════════════════════════════════════════════"; }
 
@@ -135,6 +138,7 @@ _run_shard() {   # $1 = shard index, $2 = num shards, $3 = output dir
         --num_inference_steps "$INFER_STEPS" \
         --num_shards          "$2" \
         --shard_index         "$1" \
+        --regions             "$REGIONS" \
         "${COMBO_FLAG[@]}" \
         --device              "$DEVICE"
 }
