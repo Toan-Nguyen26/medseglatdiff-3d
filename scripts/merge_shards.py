@@ -27,7 +27,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eval.infer_latent import MODALITY_NAMES, print_summary_table
+from eval.infer_latent import MODALITY_NAMES, REGION_NAMES, print_summary_table
 
 
 def _combo_label(bits: str) -> str:
@@ -136,7 +136,13 @@ def main() -> None:
         print(f"  Combo grids→ {grid_out}  ({copied} files)")
 
     # ── Redraw the table ────────────────────────────────────────────────────
-    print_summary_table(summary, out)
+    # Which regions were evaluated is discovered from the columns, not
+    # assumed: a --regions wt run only has WT_* keys, and defaulting to all
+    # three raised KeyError('TC_dice') after the shards had already finished.
+    present = [r for r in REGION_NAMES if f"{r}_dice" in rows[0]]
+    if not present:
+        raise SystemExit(f"No <region>_dice columns in {args.shard_dirs[0]}")
+    print_summary_table(summary, out, present)
 
 
 def _is_float(v: str) -> bool:
