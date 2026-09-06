@@ -33,7 +33,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data.brats_dataset import BraTSDataset, regions_to_seg
+from data.brats_dataset import (
+    BraTSDataset,
+    regions_to_seg,
+    subregions_to_regions,
+)
 from models.multiencoder.encoders import MaskVAE
 
 
@@ -98,23 +102,43 @@ def ssim_approx(pred: torch.Tensor, target: torch.Tensor, win: int = 7) -> float
 METRIC_NAMES = ["dice", "iou", "ssim", "psnr"]
 
 
+def soft_regions(prob: torch.Tensor) -> torch.Tensor:
+    """
+    Soft [WT, TC, ET] from [BG, NCR, ED, ET] sigmoid probabilities.
+
+    subregions_to_regions() thresholds, which is right for Dice and IoU but
+    destroys the continuous values SSIM and PSNR need. These definitions keep
+    them, and on a binary ground truth -- where the four channels are one-hot
+    -- they reduce exactly to the hard masks, so the target is unchanged.
+    """
+    bg, ncr, et = prob[:, 0:1], prob[:, 1:2], prob[:, 3:4]
+    wt = 1.0 - bg
+    tc = torch.clamp(ncr + et, 0.0, 1.0)
+    return torch.cat([wt, tc, et], dim=1)
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint loader
 # ---------------------------------------------------------------------------
 
-def load_vae(ckpt_path: str, device: torch.device) -> tuple[MaskVAE, dict]:
+def load_vae(ckpt_path: str, device: torch.device) -> tuple[MaskVAE, dict, bool]:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     cfg  = ckpt["config"]
     channels = tuple(int(c) for c in cfg["mask_vae_channels"].split(","))
+    # Width comes from the run that produced the checkpoint, not a constant:
+    # train_mask_vae uses 4 mutually exclusive subregions under --subregion_mode
+    # and 3 overlapping regions otherwise. Hardcoding 3 made a subregion
+    # checkpoint fail to load at all.
+    subregion = bool(cfg.get("subregion_mode", False))
     vae = MaskVAE(
-        num_classes=3,
+        num_classes=4 if subregion else 3,
         latent_channels=cfg["latent_channels"],
         channels=channels,
         num_res_units=cfg["num_res_units"],
     ).to(device)
     vae.load_state_dict(ckpt["vae_state_dict"])
     vae.eval()
-    return vae, cfg
+    return vae, cfg, subregion
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +154,7 @@ def evaluate(
     device: torch.device,
     output_dir: Path,
     latent_shape: tuple,
+    subregion: bool = False,
     max_cases: int | None = None,
 ) -> None:
     # Every case in the split is scored; only the first n_grid are drawn.
@@ -162,20 +187,30 @@ def evaluate(
 
         # --- Encode → decode (reconstruction) ---
         logits_recon, mu, logvar = vae(x)
-        prob      = logits_recon.sigmoid().float()                    # (1,3,D,H,W)
-        recon_bin = (prob > 0.5).cpu().numpy()[0]                     # (3,D,H,W)
-        gt_np     = mask.numpy()                                      # (3,D,H,W)
-        gt_t      = mask.unsqueeze(0).to(device).float()
+        prob = logits_recon.sigmoid().float()             # (1,C,D,H,W)
+        gt_t = mask.unsqueeze(0).to(device).float()       # (1,C,D,H,W)
 
-        # --- Metrics for reconstruction ---
+        if subregion:
+            # Channels here are [BG, NCR, ED, ET], so channel 0 is background,
+            # not WT. Binary metrics use the same hard conversion that
+            # infer_latent applies to the diffusion samples, so this table is
+            # the ceiling for that one rather than a slightly different number.
+            recon_bin = subregions_to_regions(prob[0].cpu().numpy()) > 0.5
+            gt_np     = subregions_to_regions(mask.numpy()) > 0.5
+            prob_r    = soft_regions(prob)                # (1,3,D,H,W)
+            gt_r      = soft_regions(gt_t)
+        else:
+            recon_bin = (prob > 0.5).cpu().numpy()[0]     # (3,D,H,W)
+            gt_np     = mask.numpy() > 0.5
+            prob_r, gt_r = prob, gt_t
+
+        # --- Metrics for reconstruction, always in [WT, TC, ET] space ---
         for j, r in enumerate(REGION_NAMES):
-            p_bin = recon_bin[j].astype(bool)
-            g_bin = gt_np[j].astype(bool)
-            scores[r]["dice"].append(dice(p_bin, g_bin))
-            scores[r]["iou"].append(iou(p_bin, g_bin))
+            scores[r]["dice"].append(dice(recon_bin[j], gt_np[j]))
+            scores[r]["iou"].append(iou(recon_bin[j], gt_np[j]))
 
-            p_t = prob[:, j:j + 1]
-            g_t = gt_t[:, j:j + 1]
+            p_t = prob_r[:, j:j + 1]
+            g_t = gt_r[:, j:j + 1]
             scores[r]["ssim"].append(ssim_approx(p_t, g_t))
             scores[r]["psnr"].append(psnr(p_t, g_t))
 
@@ -205,7 +240,9 @@ def evaluate(
         for s in range(n_samples):
             z_sample = torch.randn(1, *latent_shape, device=device)
             logits_gen = vae.decode(z_sample)
-            gen_bin    = (logits_gen.sigmoid() > 0.5).cpu().numpy()[0]
+            gen_prob   = logits_gen.sigmoid().float()[0].cpu().numpy()
+            gen_bin    = (subregions_to_regions(gen_prob) > 0.5) if subregion \
+                         else (gen_prob > 0.5)
             gen_seg    = regions_to_seg(gen_bin[0], gen_bin[1], gen_bin[2])
             _show(axes[row][2 + s], gen_seg, f"Sample {s+1}")
 
@@ -274,7 +311,7 @@ def main() -> None:
     args   = parse_args()
     device = torch.device(args.device)
 
-    vae, cfg = load_vae(args.checkpoint, device)
+    vae, cfg, subregion = load_vae(args.checkpoint, device)
 
     splits_dir = cfg.get("splits_dir") or cfg["data_root"]
     split_file = Path(splits_dir) / f"{args.split}.txt"
@@ -283,10 +320,14 @@ def main() -> None:
         root=cfg["data_root"],
         split_file=split_file,
         crop_size=cfg["crop_size"],
-        region_based=True,
+        # Must match the checkpoint: a subregion model outputs 4 channels, so
+        # the target has to be the 4-channel one-hot, not the 3 regions.
+        subregion_based=subregion,
+        region_based=not subregion,
         random_crop=False,
     )
     print(f"Test cases : {len(dataset)}")
+    print(f"Mode       : {'subregion (4ch)' if subregion else 'region (3ch)'}")
     print(f"Checkpoint : {args.checkpoint}")
     print(f"Step       : {torch.load(args.checkpoint, map_location='cpu', weights_only=True)['step']}")
     print(f"Best Dice  : {torch.load(args.checkpoint, map_location='cpu', weights_only=True).get('best_mean_dice', 'N/A')}")
@@ -300,7 +341,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     evaluate(vae, dataset, args.n_cases, args.n_samples, device, output_dir,
-             latent_shape, max_cases=args.max_cases)
+             latent_shape, subregion=subregion, max_cases=args.max_cases)
 
 
 if __name__ == "__main__":
