@@ -1,9 +1,14 @@
 """
 Evaluate a trained MaskVAE on the test split.
 
-Produces two outputs:
-  1. Dice metrics (WT/TC/ET) for reconstruction and random generation
-  2. A PNG grid showing GT, reconstruction, and sampled generations side-by-side
+Produces three outputs:
+  1. Dice / IoU / SSIM / PSNR per region (WT/TC/ET) for reconstruction
+  2. A per-case CSV of the same, so the numbers survive a Kaggle session
+  3. A PNG grid showing GT, reconstruction, and sampled generations side-by-side
+
+Metrics are computed over the whole split by default; --n_cases only controls
+how many rows the PNG grid has. Scoring just the eight cases that happen to be
+drawn would give a table with an eight-case sample size.
 
 Usage:
     python3 -m eval.eval_mask_vae \\
@@ -12,11 +17,13 @@ Usage:
 
 Optional flags:
     --n_samples   2    # how many random generations to show per case (default 2)
-    --n_cases     8    # how many test cases to include in the grid (default 8)
+    --n_cases     8    # how many test cases to draw in the grid (default 8)
+    --max_cases   N    # cap the cases scored (default: the whole split)
     --split       test # which split file to use (default: test)
 """
 
 import argparse
+import csv
 from pathlib import Path
 
 import matplotlib
@@ -24,6 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from data.brats_dataset import BraTSDataset, regions_to_seg
 from models.multiencoder.encoders import MaskVAE
@@ -53,6 +61,41 @@ def best_tumour_slice(seg: np.ndarray) -> int:
 def dice(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-5) -> float:
     tp = (pred & gt).sum()
     return float(2 * tp / (pred.sum() + gt.sum() + eps))
+
+
+def iou(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-5) -> float:
+    inter = (pred & gt).sum()
+    union = (pred | gt).sum()
+    return float(inter / (union + eps))
+
+
+# SSIM and PSNR are computed on the sigmoid probability against the binary
+# annotation, i.e. the mask is treated as a [0,1] image. Both sides already
+# live on exactly that range, so -- unlike the image autoencoder eval -- there
+# is no min-max rescaling here and the PSNR peak of 1.0 is the true one.
+# Duplicated from eval_image_vae rather than shared, to keep each script a
+# single self-contained file that runs on Kaggle without a package import.
+
+def psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
+    mse = F.mse_loss(pred, target).item()
+    return float("inf") if mse == 0 else float(10 * np.log10(1.0 / mse))
+
+
+def ssim_approx(pred: torch.Tensor, target: torch.Tensor, win: int = 7) -> float:
+    """Box-filter SSIM over a 3D volume (uniform window, not Gaussian)."""
+    C1, C2 = 0.01 ** 2, 0.03 ** 2
+    k = torch.ones(1, 1, win, win, win, device=pred.device) / (win ** 3)
+    def conv(x): return F.conv3d(x, k, padding=win // 2)
+    mx, my = conv(pred), conv(target)
+    sx  = conv(pred * pred)   - mx * mx
+    sy  = conv(target * target) - my * my
+    sxy = conv(pred * target) - mx * my
+    num = (2 * mx * my + C1) * (2 * sxy + C2)
+    den = (mx ** 2 + my ** 2 + C1) * (sx + sy + C2)
+    return float((num / den).mean().item())
+
+
+METRIC_NAMES = ["dice", "iou", "ssim", "psnr"]
 
 
 # ---------------------------------------------------------------------------
@@ -87,15 +130,18 @@ def evaluate(
     device: torch.device,
     output_dir: Path,
     latent_shape: tuple,
+    max_cases: int | None = None,
 ) -> None:
-    n_cases = min(n_cases, len(dataset))
+    # Every case in the split is scored; only the first n_grid are drawn.
+    n_scored = len(dataset) if max_cases is None else min(max_cases, len(dataset))
+    n_grid   = min(n_cases, n_scored)
+
     # cols: GT | Recon | Sample_1 | Sample_2 | ...
     n_cols = 2 + n_samples
-    col_labels = ["GT", "Recon"] + [f"Sample {i+1}" for i in range(n_samples)]
 
     fig, axes = plt.subplots(
-        n_cases, n_cols,
-        figsize=(n_cols * 2.5, n_cases * 2.5),
+        n_grid, n_cols,
+        figsize=(n_cols * 2.5, n_grid * 2.5),
         squeeze=False,
     )
     fig.suptitle(
@@ -104,22 +150,39 @@ def evaluate(
         fontsize=10,
     )
 
-    recon_scores: dict[str, list[float]] = {r: [] for r in REGION_NAMES}
+    # region -> metric -> list over cases
+    scores: dict[str, dict[str, list[float]]] = {
+        r: {m: [] for m in METRIC_NAMES} for r in REGION_NAMES
+    }
+    case_names: list[str] = []
 
-    for row in range(n_cases):
+    for row in range(n_scored):
         _, mask = dataset[row]         # (3, D, H, W) float
         x = mask.unsqueeze(0).to(device)
 
         # --- Encode → decode (reconstruction) ---
         logits_recon, mu, logvar = vae(x)
-        recon_bin = (logits_recon.sigmoid() > 0.5).cpu().numpy()[0]  # (3,D,H,W)
+        prob      = logits_recon.sigmoid().float()                    # (1,3,D,H,W)
+        recon_bin = (prob > 0.5).cpu().numpy()[0]                     # (3,D,H,W)
         gt_np     = mask.numpy()                                      # (3,D,H,W)
+        gt_t      = mask.unsqueeze(0).to(device).float()
 
-        # --- Dice for reconstruction ---
+        # --- Metrics for reconstruction ---
         for j, r in enumerate(REGION_NAMES):
-            recon_scores[r].append(
-                dice(recon_bin[j].astype(bool), gt_np[j].astype(bool))
-            )
+            p_bin = recon_bin[j].astype(bool)
+            g_bin = gt_np[j].astype(bool)
+            scores[r]["dice"].append(dice(p_bin, g_bin))
+            scores[r]["iou"].append(iou(p_bin, g_bin))
+
+            p_t = prob[:, j:j + 1]
+            g_t = gt_t[:, j:j + 1]
+            scores[r]["ssim"].append(ssim_approx(p_t, g_t))
+            scores[r]["psnr"].append(psnr(p_t, g_t))
+
+        case_names.append(dataset.names[row])
+
+        if row >= n_grid:
+            continue
 
         # --- Convert to colour seg maps ---
         gt_seg    = regions_to_seg(gt_np[0],    gt_np[1],    gt_np[2])
@@ -133,9 +196,10 @@ def evaluate(
             ax.axis("off")
 
         _show(axes[row][0], gt_seg,    f"GT (case {row})")
-        _show(axes[row][1], recon_seg, f"Recon\nWT={recon_scores['WT'][-1]:.2f} "
-                                       f"TC={recon_scores['TC'][-1]:.2f} "
-                                       f"ET={recon_scores['ET'][-1]:.2f}")
+        _show(axes[row][1], recon_seg,
+              f"Recon\nWT={scores['WT']['dice'][-1]:.2f} "
+              f"TC={scores['TC']['dice'][-1]:.2f} "
+              f"ET={scores['ET']['dice'][-1]:.2f}")
 
         # --- Random generations: sample z ~ N(0,1) → decode ---
         for s in range(n_samples):
@@ -149,30 +213,41 @@ def evaluate(
     out_path = output_dir / "test_eval_grid.png"
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Grid saved → {out_path}")
+    print(f"  Grid saved → {out_path} ({n_grid} of {n_scored} scored cases)")
+
+    # --- Per-case CSV, so the numbers outlive the Kaggle session ---
+    csv_path = output_dir / "mask_vae_metrics.csv"
+    with csv_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["case"] + [f"{r}_{m}" for r in REGION_NAMES
+                                          for m in METRIC_NAMES])
+        for i, name in enumerate(case_names):
+            w.writerow([name] + [f"{scores[r][m][i]:.6f}" for r in REGION_NAMES
+                                                          for m in METRIC_NAMES])
+    print(f"  CSV  saved → {csv_path}")
 
     # --- Print aggregate metrics ---
-    print(f"\n{'='*50}")
-    print(f"Reconstruction Dice (n={n_cases} test cases)")
-    print(f"{'='*50}")
+    print(f"\n{'='*62}")
+    print(f"MaskVAE reconstruction (n={n_scored} cases)")
+    print(f"{'='*62}")
+    print(f"{'Region':<8} {'Dice':>9} {'IoU':>9} {'SSIM':>9} {'PSNR(dB)':>10}")
+    print("-" * 62)
     for r in REGION_NAMES:
-        vals = recon_scores[r]
-        print(f"  {r}: mean={np.mean(vals):.4f}  "
-              f"std={np.std(vals):.4f}  "
-              f"min={np.min(vals):.4f}  "
-              f"max={np.max(vals):.4f}")
-    mean_all = np.mean([np.mean(v) for v in recon_scores.values()])
-    print(f"  mean: {mean_all:.4f}")
+        vals = [np.mean(scores[r][m]) for m in METRIC_NAMES]
+        print(f"{r:<8} {vals[0]:>9.4f} {vals[1]:>9.4f} "
+              f"{vals[2]:>9.4f} {vals[3]:>10.2f}")
+    means = [np.mean([np.mean(scores[r][m]) for r in REGION_NAMES])
+             for m in METRIC_NAMES]
+    print("-" * 62)
+    print(f"{'mean':<8} {means[0]:>9.4f} {means[1]:>9.4f} "
+          f"{means[2]:>9.4f} {means[3]:>10.2f}")
 
-    # --- Per-case table ---
-    print(f"\n{'Case':<30} {'WT':>6} {'TC':>6} {'ET':>6}")
-    print("-" * 48)
-    for i in range(n_cases):
-        name = dataset.names[i]
-        wt = recon_scores["WT"][i]
-        tc = recon_scores["TC"][i]
-        et = recon_scores["ET"][i]
-        print(f"  {name:<28} {wt:>6.3f} {tc:>6.3f} {et:>6.3f}")
+    # Spread on Dice only — the column the paper quotes as the ceiling.
+    print(f"\nDice spread")
+    for r in REGION_NAMES:
+        v = scores[r]["dice"]
+        print(f"  {r}: mean={np.mean(v):.4f}  std={np.std(v):.4f}  "
+              f"min={np.min(v):.4f}  max={np.max(v):.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +260,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--output_dir", default="eval_out/mask_vae")
     p.add_argument("--split",      default="test")
-    p.add_argument("--n_cases",    type=int, default=8)
+    p.add_argument("--n_cases",    type=int, default=8,
+                   help="Cases drawn in the PNG grid (metrics use the whole split)")
+    p.add_argument("--max_cases",  type=int, default=None,
+                   help="Cap the cases scored. Omit to score the whole split.")
     p.add_argument("--n_samples",  type=int, default=2,
                    help="Random samples from N(0,1) prior to show per case")
     p.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")
@@ -221,7 +299,8 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    evaluate(vae, dataset, args.n_cases, args.n_samples, device, output_dir, latent_shape)
+    evaluate(vae, dataset, args.n_cases, args.n_samples, device, output_dir,
+             latent_shape, max_cases=args.max_cases)
 
 
 if __name__ == "__main__":
