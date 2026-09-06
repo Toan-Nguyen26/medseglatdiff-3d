@@ -297,6 +297,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--output_dir", default="eval_out/mask_vae")
     p.add_argument("--split",      default="test")
+    p.add_argument("--data_root",  default=None,
+                   help="Override the data root recorded in the checkpoint. "
+                        "Needed when evaluating somewhere other than the "
+                        "machine that trained it.")
+    p.add_argument("--splits_dir", default=None,
+                   help="Override the splits directory recorded in the "
+                        "checkpoint.")
+
     p.add_argument("--n_cases",    type=int, default=8,
                    help="Cases drawn in the PNG grid (metrics use the whole split)")
     p.add_argument("--max_cases",  type=int, default=None,
@@ -313,11 +321,21 @@ def main() -> None:
 
     vae, cfg, subregion = load_vae(args.checkpoint, device)
 
-    splits_dir = cfg.get("splits_dir") or cfg["data_root"]
+    # The checkpoint records the paths of the machine that trained it, which
+    # do not exist anywhere else. Command-line values win when given.
+    data_root  = args.data_root  or cfg["data_root"]
+    splits_dir = args.splits_dir or cfg.get("splits_dir") or data_root
     split_file = Path(splits_dir) / f"{args.split}.txt"
+    if not split_file.exists():
+        raise SystemExit(
+            f"Split file not found: {split_file}\n"
+            f"  checkpoint recorded data_root={cfg.get('data_root')!r} "
+            f"splits_dir={cfg.get('splits_dir')!r}\n"
+            f"  pass --data_root / --splits_dir to point at this machine."
+        )
 
     dataset = BraTSDataset(
-        root=cfg["data_root"],
+        root=data_root,
         split_file=split_file,
         crop_size=cfg["crop_size"],
         # Must match the checkpoint: a subregion model outputs 4 channels, so
