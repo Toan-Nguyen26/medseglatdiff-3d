@@ -1,0 +1,100 @@
+% ---------------------------------------------------------------------------
+%  Section 2 -- Related Work   (~640 words)
+%
+%  Written independently of the MedSegLatDiff related-work section. Reusing
+%  those sentences verbatim would be self-plagiarism even though the authors
+%  overlap, so the two papers must not share prose.
+%
+%  The former 2.3 (Uncertainty Estimation and its Evaluation) was cut for
+%  space: the MC dropout / ensemble contrast is already made in Sec. 3.4, and
+%  the point about multi-annotator datasets is already made in Sec. 1. The
+%  nguyen2025aleatoric citation was moved into 2.2 so it is not orphaned.
+% ---------------------------------------------------------------------------
+
+\section{Related Work}
+\label{sec:related_work}
+
+% ---------------------------------------------------------------------------
+\subsection{Incomplete Multimodal Tumour Segmentation}
+\label{subsec:rw-incomplete}
+
+Brain tumour segmentation benchmarks assume four co-registered MRI sequences,
+but clinical acquisitions often deviate. Examinations are shortened, series
+are corrupted by motion, and contrast administration may be contraindicated. A
+model that requires the complete protocol is therefore unusable on a large
+share of real studies, and the literature on incomplete multimodal
+segmentation addresses this in three main ways.
+
+The first synthesises what is absent, generating the missing sequence and
+passing the completed set to a conventional segmentation network. This leaves
+the segmentation architecture unchanged, but accuracy then depends on the
+quality of the synthesis, and errors introduced there carry through into the
+mask. The second learns a representation that does not depend on which
+sequences are present. HeMIS~\cite{hemis} pools per-modality features using
+statistics that are defined for any subset, so a single model accepts
+arbitrary inputs. RFNet~\cite{rfnet} refines this with region-aware fusion
+that weights modalities differently for different tumour components, since
+enhancement and oedema are visible in different sequences. The third distils a
+full-modality teacher into a student that observes only a subset, transferring
+knowledge the student cannot obtain from its own input. Transformer-based
+approaches such as mmFormer~\cite{mmformer} combine modality-specific encoders
+with inter-modality attention to model long-range dependencies across
+sequences.
+
+A recent refinement separates representation learning from fusion.
+UniME~\cite{unime} first pretrains a single shared encoder with masked
+self-supervision, so that a modality-agnostic representation is established
+before any fusion mechanism is introduced. Parallel modality-specific encoders
+are attached only afterwards, and their features are combined at multiple
+scales. Decoupling the two stages reduces the burden on the fusion module,
+which no longer has to learn what each sequence contributes and how to combine
+them at the same time.
+
+These methods differ in mechanism but agree in output: each returns a single
+deterministic mask, whatever subset it was given. Accuracy is reported as a
+function of the available sequences, but the confidence attached to the
+prediction is not. A segmentation produced from one sequence is therefore
+presented in the same form as one produced from four. How a model's expressed
+confidence should respond when evidence is withdrawn is, to our knowledge, not
+addressed in this literature.
+
+% ---------------------------------------------------------------------------
+\subsection{Generative Approaches to Segmentation}
+\label{subsec:rw-generative}
+
+Discriminative segmentation networks, from fully convolutional
+architectures~\cite{fcn} through U-Net~\cite{unet} and its
+successors~\cite{unet++,nnunet}, learn a mapping from image to mask. The
+mapping is one-to-one by construction: for a given input the model has exactly
+one answer, so the disagreement observed between expert annotators cannot
+appear in the output.
+
+Generative formulations relax this. Latent-variable models attach a stochastic
+code to a segmentation backbone and decode different samples of that code into
+different masks. The Probabilistic U-Net~\cite{probunet} draws a global latent
+from a conditional prior, and PHiSeg~\cite{phiseg} extends the idea to a
+hierarchy of latents at several resolutions. Their expressiveness is limited
+by the size of that latent and by the tendency of the KL term to make the
+decoder ignore it.
+
+Diffusion models~\cite{ddpm} avoid this limit by building the distribution
+through iterative refinement rather than a single stochastic bottleneck.
+Conditioning a denoising network on the input image turns generation into
+segmentation, and repeated sampling gives an ensemble from one set of
+weights~\cite{ensemblediff,segdiff}. MedSegDiff~\cite{medsegdiff} strengthens
+the conditioning with frequency-domain filtering of the guidance signal. The
+cost is that every sample requires many network evaluations at full
+resolution, which is acceptable in two dimensions and prohibitive in three.
+
+Latent diffusion~\cite{ldm} removes that cost by moving the process into a
+compressed space learned by an autoencoder. The approach has been used for
+medical segmentation by LSegDiff~\cite{lsegdiff} and LDSeg~\cite{ldseg}.On the other hand, MedSegLatDiff~\cite{medseglatdiff} pairs two
+autoencoders with a latent diffusion model and shows that a reconstruction
+loss weighted towards the foreground is needed when targets are small, while
+LatentFM~\cite{latentfm} replaces the diffusion trajectory with flow matching
+in the same latent space to shorten sampling. Uncertainty arising from
+incomplete inputs has also begun to receive attention, including flow-matching
+formulations~\cite{nguyen2025aleatoric}. These methods operate on
+two-dimensional images with all inputs present, and evaluate on datasets whose
+ambiguity is fixed by the annotations. The present work extends this line to
+volumetric data and to inputs that are deliberately incomplete.

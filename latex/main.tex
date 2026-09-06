@@ -1,0 +1,82 @@
+% ---------------------------------------------------------------------------
+% MoE-LoRA cho sinh bao cao X-quang nguc -- SOICT
+% Template: Springer LNCS/CCIS (llncs.cls), bibliography style splncs04
+%
+% BIEN DICH:
+%   pdflatex main
+%   bibtex   main
+%   pdflatex main
+%   pdflatex main
+% (hoac: latexmk -pdf main)
+%
+% Bai RAG cu da sao luu tai: ../latex_OLD_rag_paper_backup.tgz
+% ---------------------------------------------------------------------------
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}          % \mathbb -- used for indicators and R/E in Sec. 3
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{float}
+
+% Springer khuyen dung URL mau xanh theo style eBook
+\usepackage{color}
+
+\graphicspath{{figures/}}
+
+\begin{document}
+
+% ---------------------------------------------------------------------------
+% TITLE
+%
+% Default covers method, problem and contribution without overclaiming.
+%
+% Alternatives, if you want the uncertainty angle foregrounded or dropped:
+%   \title{Missing Modalities as a Controlled Probe of Predictive Uncertainty
+%          in Brain Tumour Segmentation}
+%   \title{Latent Diffusion for Whole-Tumour Segmentation from Incomplete
+%          Multi-Sequence MRI}
+%
+% !! DO NOT use "Calibrated" -- needs a calibration metric (AUSE/ECE), which
+%    we deliberately cut. Monotonicity alone does not support it.
+% !! DO NOT use "Robust" -- invites an accuracy comparison against RFNet /
+%    mmFormer / UniME that is not the claim of this paper.
+% !! DO NOT use "Efficient" -- no wall-clock comparison against a pixel-space
+%    baseline is reported.
+% ---------------------------------------------------------------------------
+\title{Uncertainty-Aware Latent Diffusion for Brain Tumour Segmentation
+       with Missing Modalities}
+
+\titlerunning{Uncertainty-Aware Latent Diffusion with Missing Modalities}
+
+% TODO: confirm author order, and fill in the third email address.
+\author{Hai-Toan Nguyen\inst{1}\thanks{Corresponding author} \and
+Ngoc-Huynh Trinh\inst{1} \and
+Tuan-Hung Nguyen\inst{1}}
+
+\authorrunning{H.-T. Nguyen et al.}
+
+\institute{Institute for Artificial Intelligence, VNU University of Engineering
+and Technology, Hanoi 10000, Vietnam\\
+\email{\{nguyenhaitoan, huynhtn\}@vnu.edu.vn}}
+
+\maketitle
+
+\input{Content/abstract}
+\input{Content/introduction}
+\input{Content/related_work}
+\input{Content/method}
+\input{Content/experiments}
+\input{Content/conclusion}
+
+% ---------------------------------------------------------------------------
+% \section*{Acknowledgements}   % neu can
+
+\bibliographystyle{splncs04}
+\bibliography{refs}
+
+\end{document}

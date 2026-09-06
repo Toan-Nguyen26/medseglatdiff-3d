@@ -1,0 +1,373 @@
+% ---------------------------------------------------------------------------
+%  Bibliography entries for Section 3 (Method)
+%
+%  VERIFY BEFORE SUBMITTING: titles, authors, venues and arXiv IDs are
+%  reliable; page numbers and volume numbers are the fields most likely to be
+%  wrong. DOIs are omitted rather than guessed.
+%
+%  Already present in the MedSegLatDiff bibliography -- copy from there:
+%    ddpm, ddim, vae, ldm, unet
+% ---------------------------------------------------------------------------
+
+
+% === Probabilistic segmentation (cited in 3.1 and 3.4) =====================
+
+@inproceedings{probunet,
+  title     = {A Probabilistic U-Net for Segmentation of Ambiguous Images},
+  author    = {Kohl, Simon A. A. and Romera-Paredes, Bernardino and
+               Meyer, Clemens and De Fauw, Jeffrey and Ledsam, Joseph R. and
+               Maier-Hein, Klaus H. and Eslami, S. M. Ali and
+               Rezende, Danilo Jimenez and Ronneberger, Olaf},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  volume    = {31},
+  year      = {2018},
+  note      = {The one-to-many segmentation baseline. Combines a U-Net with a
+               conditional VAE latent; evaluated on LIDC-IDRI with GED.
+               arXiv:1806.05034}
+}
+
+@inproceedings{phiseg,
+  title     = {{PHiSeg}: Capturing Uncertainty in Medical Image Segmentation},
+  author    = {Baumgartner, Christian F. and Tezcan, Kerem C. and
+               Chaitanya, Krishna and H{\"o}tker, Andreas M. and
+               Muehlematter, Urs J. and Schawkat, Khoschy and
+               Becker, Anton S. and Donati, Olivio and Konukoglu, Ender},
+  booktitle = {Medical Image Computing and Computer Assisted Intervention
+               (MICCAI)},
+  pages     = {119--127},
+  year      = {2019},
+  publisher = {Springer},
+  note      = {Hierarchical extension of the Probabilistic U-Net.
+               arXiv:1906.04045}
+}
+
+
+% === Alternative uncertainty estimators (cited in 3.4) =====================
+
+@inproceedings{mcdropout,
+  title     = {Dropout as a {Bayesian} Approximation: Representing Model
+               Uncertainty in Deep Learning},
+  author    = {Gal, Yarin and Ghahramani, Zoubin},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  pages     = {1050--1059},
+  year      = {2016},
+  organization = {PMLR},
+  note      = {Perturbs the network at inference and reports the resulting
+               instability. arXiv:1506.02142}
+}
+
+@inproceedings{deepensembles,
+  title     = {Simple and Scalable Predictive Uncertainty Estimation using
+               Deep Ensembles},
+  author    = {Lakshminarayanan, Balaji and Pritzel, Alexander and
+               Blundell, Charles},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  volume    = {30},
+  year      = {2017},
+  note      = {Principled but requires N independent trainings.
+               arXiv:1612.01474}
+}
+
+
+% === Information theory (cited in 3.5, for the data processing inequality) ==
+
+@book{cover2006elements,
+  title     = {Elements of Information Theory},
+  author    = {Cover, Thomas M. and Thomas, Joy A.},
+  edition   = {2nd},
+  publisher = {Wiley-Interscience},
+  year      = {2006},
+  note      = {Data processing inequality, Thm 2.8.1. Cite in 3.5 to support
+               Eq.~(dpi) rather than asserting it}
+}
+
+
+% === Dataset (cited in 4.1) ================================================
+% NOTE: the standard practice is to cite Menze + Bakas + the year-specific
+% challenge paper together. Check which 2023/2024 paper the organisers ask
+% for -- this is the entry I am least certain about.
+
+@article{brats_menze,
+  title   = {The Multimodal Brain Tumor Image Segmentation Benchmark
+             ({BRATS})},
+  author  = {Menze, Bjoern H. and Jakab, Andras and Bauer, Stefan and
+             Kalpathy-Cramer, Jayashree and Farahani, Keyvan and
+             Kirby, Justin and others},
+  journal = {IEEE Transactions on Medical Imaging},
+  volume  = {34},
+  number  = {10},
+  pages   = {1993--2024},
+  year    = {2015}
+}
+
+@article{brats_bakas,
+  title   = {Advancing The Cancer Genome Atlas glioma {MRI} collections with
+             expert segmentation labels and radiomic features},
+  author  = {Bakas, Spyridon and Akbari, Hamed and Sotiras, Aristeidis and
+             Bilello, Michel and Rozycki, Martin and Kirby, Justin S. and
+             others},
+  journal = {Scientific Data},
+  volume  = {4},
+  number  = {1},
+  pages   = {170117},
+  year    = {2017}
+}
+
+@article{brats2021,
+  title   = {The {RSNA-ASNR-MICCAI BraTS} 2021 Benchmark on Brain Tumor
+             Segmentation and Radiogenomic Classification},
+  author  = {Baid, Ujjwal and Ghodasara, Satyam and Mohan, Suyash and
+             Bilello, Michel and Calabrese, Evan and Colak, Errol and others},
+  journal = {arXiv preprint arXiv:2107.02314},
+  year    = {2021}
+}
+
+
+% === Missing-modality segmentation =========================================
+% For the related-work paragraph. VERIFY THESE CAREFULLY -- this is the
+% subfield a reviewer is most likely to know well, and a wrong attribution
+% here is the most damaging kind.
+
+@inproceedings{hemis,
+  title     = {{HeMIS}: Hetero-Modal Image Segmentation},
+  author    = {Havaei, Mohammad and Guizard, Nicolas and Chapados, Nicolas and
+               Bengio, Yoshua},
+  booktitle = {Medical Image Computing and Computer Assisted Intervention
+               (MICCAI)},
+  pages     = {469--477},
+  year      = {2016},
+  publisher = {Springer},
+  note      = {Early work on segmentation with arbitrary subsets of modalities}
+}
+
+@inproceedings{rfnet,
+  title     = {{RFNet}: Region-aware Fusion Network for Incomplete
+               Multi-modal Brain Tumor Segmentation},
+  author    = {Ding, Yuhang and Yu, Xin and Yang, Yi},
+  booktitle = {Proceedings of the IEEE/CVF International Conference on
+               Computer Vision (ICCV)},
+  pages     = {3975--3984},
+  year      = {2021}
+}
+
+@inproceedings{mmformer,
+  title     = {{mmFormer}: Multimodal Medical Transformer for Incomplete
+               Multimodal Learning of Brain Tumor Segmentation},
+  author    = {Zhang, Yao and He, Nanjun and Yang, Jiawei and Li, Yuexiang and
+               Wei, Dong and Huang, Yawen and Zhang, Yang and He, Zhiqiang and
+               Zheng, Yefeng},
+  booktitle = {Medical Image Computing and Computer Assisted Intervention
+               (MICCAI)},
+  pages     = {107--117},
+  year      = {2022},
+  publisher = {Springer},
+  note      = {arXiv:2206.02425}
+}
+
+
+% === Our prior work (cited in Related Work 2.2) =============================
+% VERIFY: FJCAI 2026 page numbers once proceedings are out.
+
+@inproceedings{medseglatdiff,
+  title     = {Diffusion Model in Latent Space for Medical Image Segmentation
+               Task},
+  author    = {Trinh, Ngoc Huynh and Nguyen, Hai Toan and Luong, Son Ba and
+               Tran, Quoc Long},
+  booktitle = {Vietnamese National Symposium on Artificial Intelligence
+               (FJCAI)},
+  year      = {2026},
+  note      = {Two VQ-VAEs + latent diffusion, 2D. Weighted cross-entropy for
+               mask reconstruction}
+}
+
+@inproceedings{latentfm,
+  title     = {{LatentFM}: A Latent Flow Matching Approach for Generative
+               Medical Image Segmentation},
+  author    = {Trinh, Ngoc Huynh and Nguyen, Kim Hoang Anh and
+               Nguyen, Hai Toan and Tran, Quoc Long},
+  booktitle = {Vietnamese National Symposium on Artificial Intelligence
+               (FJCAI)},
+  year      = {2026},
+  note      = {Flow matching in place of diffusion, same latent space}
+}
+
+
+% === Closest related work -- MUST VERIFY =====================================
+% The CVF page blocks automated access (HTTP 403), so this entry is built from
+% the official repository README, not the paper itself.
+%
+% TWO THINGS TO CHECK AGAINST THE PDF:
+%   1. AUTHOR LIST -- only the first author's surname (Song) is recoverable
+%      from the CVF filename. Fill in the rest.
+%   2. TITLE -- the repo README gives "... for Brain Tumor Segmentation with
+%      Missing Modalities" but the CVF filename ends at "... Segmentation".
+%      One of the two is truncated; use whatever the published PDF says.
+%
+% Repo: the local UniME/ checkout. Acknowledges RFNet and mmFormer, which
+% confirms those are the accepted baselines for this subfield.
+
+@inproceedings{unime,
+  title     = {Uni-Encoder Meets Multi-Encoders: Representation Before Fusion
+               for Brain Tumor Segmentation with Missing Modalities},
+  author    = {Song, Peibo and Xue, Xiaotian and Zhang, Jinshuo and
+               Wang, Zihao and Liu, Jinhua and Fu, Shujun and
+               Bao, Fangxun and Yeo, Si Yong},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  year      = {2026}
+}
+
+
+% ===========================================================================
+%  Added: keys cited by introduction / related_work / method / experiments.
+%  Transcribed from the MedSegLatDiff bibliography -- your own already-checked
+%  references, not entries reconstructed from memory.
+% ===========================================================================
+
+@inproceedings{fcn,
+  title     = {Fully Convolutional Networks for Semantic Segmentation},
+  author    = {Long, Jonathan and Shelhamer, Evan and Darrell, Trevor},
+  booktitle = {Proceedings of the IEEE Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  pages     = {3431--3440},
+  year      = {2015}
+}
+
+@inproceedings{unet,
+  title     = {U-Net: Convolutional Networks for Biomedical Image
+               Segmentation},
+  author    = {Ronneberger, Olaf and Fischer, Philipp and Brox, Thomas},
+  booktitle = {Medical Image Computing and Computer-Assisted Intervention
+               (MICCAI)},
+  pages     = {234--241},
+  year      = {2015}
+}
+
+@inproceedings{unet++,
+  title     = {UNet++: A Nested U-Net Architecture for Medical Image
+               Segmentation},
+  author    = {Zhou, Zongwei and Rahman Siddiquee, Md Mahfuzur and
+               Tajbakhsh, Nima and Liang, Jianming},
+  booktitle = {Deep Learning in Medical Image Analysis (DLMIA)},
+  pages     = {3--11},
+  year      = {2018}
+}
+
+@article{nnunet,
+  title   = {nnU-Net: A Self-Configuring Method for Deep Learning-Based
+             Biomedical Image Segmentation},
+  author  = {Isensee, Fabian and Jaeger, Paul F. and Kohl, Simon A. A. and
+             Petersen, Jens and Maier-Hein, Klaus H.},
+  journal = {Nature Methods},
+  volume  = {18},
+  number  = {2},
+  pages   = {203--211},
+  year    = {2021}
+}
+
+@article{vae,
+  title   = {Auto-Encoding Variational Bayes},
+  author  = {Kingma, Diederik P. and Welling, Max},
+  journal = {arXiv preprint arXiv:1312.6114},
+  year    = {2013}
+}
+
+@article{ddpm,
+  title   = {Denoising Diffusion Probabilistic Models},
+  author  = {Ho, Jonathan and Jain, Ajay and Abbeel, Pieter},
+  journal = {Advances in Neural Information Processing Systems},
+  volume  = {33},
+  pages   = {6840--6851},
+  year    = {2020}
+}
+
+@article{ddim,
+  title   = {Denoising Diffusion Implicit Models},
+  author  = {Song, Jiaming and Meng, Chenlin and Ermon, Stefano},
+  journal = {arXiv preprint arXiv:2010.02502},
+  year    = {2020}
+}
+
+@inproceedings{ldm,
+  title     = {High-Resolution Image Synthesis with Latent Diffusion Models},
+  author    = {Rombach, Robin and Blattmann, Andreas and Lorenz, Dominik and
+               Esser, Patrick and Ommer, Bj{\"o}rn},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR)},
+  pages     = {10684--10695},
+  year      = {2022}
+}
+
+@inproceedings{ensemblediff,
+  title     = {Diffusion Models for Implicit Image Segmentation Ensembles},
+  author    = {Wolleb, Julia and Sandk{\"u}hler, Robin and Bieder, Florentin and
+               Valmaggia, Philippe and Cattin, Philippe C.},
+  booktitle = {Medical Imaging with Deep Learning (MIDL)},
+  pages     = {1336--1348},
+  year      = {2022}
+}
+
+@article{segdiff,
+  title   = {SegDiff: Image Segmentation with Diffusion Probabilistic Models},
+  author  = {Amit, Tomer and Shaharbany, Tal and Nachmani, Eliya and
+             Wolf, Lior},
+  journal = {arXiv preprint arXiv:2112.00390},
+  year    = {2021}
+}
+
+@inproceedings{medsegdiff,
+  title     = {MedSegDiff: Medical Image Segmentation with Diffusion
+               Probabilistic Model},
+  author    = {Wu, Junde and Fu, Rao and Fang, Huihui and Zhang, Yu and
+               Yang, Yehui and Xiong, Haoyi and Liu, Huiying and Xu, Yanwu},
+  booktitle = {Medical Imaging with Deep Learning (MIDL)},
+  pages     = {1623--1639},
+  year      = {2024}
+}
+
+@inproceedings{lsegdiff,
+  title     = {LSegDiff: A Latent Diffusion Model for Medical Image
+               Segmentation},
+  author    = {Vu Quoc, Huy and others},
+  booktitle = {Proceedings of the International Symposium on Information and
+               Communication Technology (SOICT)},
+  pages     = {456--462},
+  year      = {2023}
+}
+
+@article{ldseg,
+  title   = {Latent Diffusion for Medical Image Segmentation: End-to-End
+             Learning for Fast Sampling and Accuracy},
+  author  = {Zaman, Fahim Ahmed and others},
+  journal = {arXiv preprint arXiv:2407.12952},
+  year    = {2024}
+}
+
+@inproceedings{nguyen2025aleatoric,
+  title     = {Aleatoric Uncertainty Medical Image Segmentation Estimation
+               via Flow Matching},
+  author    = {Nguyen, Van Phi and others},
+  booktitle = {International Workshop on Uncertainty for Safe Utilization of
+               Machine Learning in Medical Imaging},
+  pages     = {134--144},
+  year      = {2025}
+}
+
+@article{lidc-idri,
+  title   = {The Lung Image Database Consortium ({LIDC}) and Image Database
+             Resource Initiative ({IDRI})},
+  author  = {Armato III, Samuel G. and McLennan, Geoffrey and Bidaut, Luc and
+             McNitt-Gray, Michael F. and Meyer, Charles R. and others},
+  journal = {Medical Physics},
+  volume  = {38},
+  number  = {2},
+  pages   = {915--931},
+  year    = {2011}
+}
+
+@article{adam,
+  title   = {Decoupled Weight Decay Regularization},
+  author  = {Loshchilov, Ilya and Hutter, Frank},
+  journal = {arXiv preprint arXiv:1711.05101},
+  year    = {2017}
+}

@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"name": "medseglatdiff-3d",
+			"path": "../.."
+		},
+		{
+			"name": "latex",
+			"path": "../../../../Downloads/latex"
+		},
+		{
+			"name": "PTM",
+			"path": "../../../../Downloads/PTM"
+		}
+	],
+	"settings": {}
+}

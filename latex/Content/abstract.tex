@@ -1,0 +1,41 @@
+\begin{abstract}
+
+% Springer asks for 150--250 words. ~215 here.
+%
+% Structure:
+%   1. Setting      -- four-sequence MRI, sequences often missing in practice
+%   2. Gap          -- existing methods keep accuracy but return one mask
+%   3. Method       -- 3D latent diffusion, modality dropout, N samples
+%   4. Contribution -- the restricted uncertainty average
+%   5. Evaluation   -- 2601 studies, accuracy holds, uncertainty responds
+%
+% !! The Dice figure below is marked XX. As of the current run whole-tumour
+%    Dice is about 92 on the test split, but the baseline comparison is still
+%    being re-run, so insert the final number deliberately rather than letting
+%    a provisional one reach submission.
+
+Brain tumour segmentation from magnetic resonance imaging normally assumes
+that all four imaging sequences are available, but in clinical practice one or
+more are frequently missing. Existing methods for incomplete inputs maintain
+accuracy by learning modality-invariant representations or by distilling from
+a full-modality teacher, yet they return a single segmentation mask regardless
+of how much information the input contains. A prediction made from one
+sequence is therefore presented in the same form as one made from four, and
+the reader is given no indication of how confident the model is. This paper
+proposes a three-dimensional conditional latent diffusion framework that
+produces several plausible segmentations for a given study, together with a
+voxel-wise map of their disagreement. Two volumetric autoencoders compress
+images and annotations before diffusion, which makes sampling over $128^{3}$
+volumes practical, and modality availability is randomly resampled during
+training so that a single model serves all fifteen acquisition
+configurations. We further show that averaging predictive variance over the
+whole volume conflates confidence with lesion size, and propose a restricted
+average that remains comparable as sequences are withdrawn. Evaluations on
+$2{,}601$ studies from BraTS 2023 and 2024 indicate that the method maintains
+whole-tumour accuracy under incomplete inputs, and that the predicted
+uncertainty increases as sequences are removed.
+
+\keywords{Brain Tumour Segmentation \and Latent Diffusion Model \and
+Missing Modalities \and Uncertainty Estimation \and Magnetic Resonance
+Imaging}
+\end{abstract}

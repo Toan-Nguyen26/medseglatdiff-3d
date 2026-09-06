@@ -1,0 +1,229 @@
+% ---------------------------------------------------------------------------
+%  Section 4 -- Experiments
+%
+%  4.1-4.3 are complete: every hyperparameter below was read from the config
+%  embedded in the trained checkpoints, not from memory.
+%
+%  4.4 is a skeleton. Numbers are marked "--" and each table carries a comment
+%  saying which file the values come from.
+%
+%  CASE COUNTS VERIFIED: 1251 + 1350 = 2601 studies; a 70/20/10 split gives
+%  1821 / 520 / 260. Cross-checked against the training log -- 1821 train
+%  cases at batch 32 with drop_last is 56 steps/epoch, and 200 epochs x 56 =
+%  11200 steps, exactly what EXPERIMENTS.md recorded for the ImageVAE run.
+%
+%  STILL TO CONFIRM:
+%    - The checkpoint available here was trained with subregion_mode=True,
+%      i.e. a four-channel annotation autoencoder. The text below describes
+%      the binary configuration. Re-check 4.2 against the config of the run
+%      that actually produces the reported numbers.
+%    - Training hardware (marked TODO inline).
+% ---------------------------------------------------------------------------
+
+\section{Experiments}
+\label{sec:experiments}
+
+% ---------------------------------------------------------------------------
+\subsection{Dataset and Preprocessing}
+\label{subsec:dataset}
+
+We evaluate on the BraTS 2023 and 2024 adult glioma
+collections~\cite{brats_menze,brats_bakas,brats2021}, which provide
+$1{,}251$ and $1{,}350$ studies with publicly released annotations, giving
+$2{,}601$ in total. Each study provides four co-registered, skull-stripped
+sequences (T1, T1CE, T2 and FLAIR) at
+$240 \times 240 \times 155$ with a voxel-wise expert annotation. As described
+in Section~\ref{subsec:problem}, we take the whole tumour as the binary
+target.
+
+Intensities are normalised per sequence and per study by $z$-scoring over
+brain voxels only, so that background air does not bias the statistics and
+scanner-dependent ranges are placed on a common scale. Each study is then
+cropped to a fixed $128^{3}$ window centred on the centroid of the annotation
+bounding box. A fixed crop allows annotation latents to be computed once and
+cached, and this window retains the complete tumour for $97\%$ of studies.
+
+Studies are partitioned patient-wise into training, validation and test sets
+in a $70{:}20{:}10$ ratio with a fixed seed, giving $1{,}821$, $520$ and
+$260$ studies respectively. All configurations of a given study fall in the
+same partition, so no case is ever evaluated under one subset of sequences
+while having been trained on under another.
+
+% ---------------------------------------------------------------------------
+\subsection{Implementation Details}
+\label{subsec:implementation}
+
+\paragraph{Autoencoders.}
+Both autoencoders use a residual convolutional encoder--decoder with two
+residual units per level and two downsampling stages, mapping $128^{3}$ inputs
+to $32^{3}$ latents. The image autoencoder uses channel widths
+$(64, 128, 256)$ and a KL weight of $\beta_{X} = 10^{-4}$; the annotation
+autoencoder uses $(32, 64, 128)$, a latent width of $C_{S} = 4$ and
+$\beta_{S} = 10^{-2}$. The larger KL weight on the annotation branch reflects its
+simpler target, since a binary mask needs less latent capacity than a
+four-sequence volume.
+
+Both are trained for 200 epochs with AdamW~\cite{adam}, learning rate
+$10^{-4}$, weight decay $10^{-4}$ and batch size 32, with early stopping after
+25 validation checks without improvement. Modality dropout is applied when
+training the image autoencoder as well as the diffusion model, so the encoder learns to
+represent partial inputs rather than meeting them for the first time at
+inference. Both autoencoders are frozen thereafter.
+
+\paragraph{Diffusion model.}
+The denoising network is a 3D U-Net with base width 64, channel multipliers
+$(1, 2, 4)$ and two residual blocks per level, totalling $31.3$M parameters.
+The image latent is projected from 256 to 64 channels before being
+concatenated with the noisy annotation latent, so that the conditioning does not dominate the input by width. Training uses $T = 1000$ timesteps with a
+linear noise schedule, $2 \times 10^{5}$ optimisation steps, batch size 64 and
+AdamW with learning rate $10^{-4}$ and weight decay $10^{-4}$. The modality
+vector $\mathbf{m}$ is resampled independently for every example, uniformly
+over the 15 non-empty configurations.
+
+\paragraph{Inference.}
+Sampling uses DDIM~\cite{ddim} with 50 steps. We draw $N = 5$ samples per
+case, average them to obtain the prediction, and threshold at $\tau = 0.5$.
+Figure~\ref{fig:n-sweep} shows how whole-tumour Dice varies with $N$ on the
+full-modality configuration. Accuracy rises steeply for the first few samples
+and then flattens, so $N = 5$ sits at the point where further samples cost
+inference time without improving the ensemble.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.62\textwidth]{n_sweep.pdf}
+    \caption{Whole-tumour Dice against the number of sampling seeds $N$, with
+    all four sequences available. The curve flattens after five samples, which
+    is the value used throughout.}
+    \label{fig:n-sweep}
+\end{figure} All experiments use a fixed random seed and are implemented in
+PyTorch; training was performed on NVIDIA H200 GPUs. % TODO: confirm hardware
+
+% ---------------------------------------------------------------------------
+\subsection{Evaluation Protocol and Metrics}
+\label{subsec:metrics}
+
+Every test case is evaluated under all 15 modality configurations, giving a
+complete case $\times$ configuration grid. Segmentation quality is reported
+with the Dice coefficient and Intersection over Union between the thresholded
+ensemble and the annotation. Predictive uncertainty is reported with
+$U(X_{\mathbf{m}})$ from Eq.~\eqref{eq:uncertainty}, the mean sample variance
+restricted to the region where samples can disagree, and with the paired
+difference $\Delta U_{i}(\mathbf{m})$ of Eq.~\eqref{eq:delta-u} relative to
+the fully observed input for the same case.
+
+Because the autoencoder is frozen, its reconstruction fidelity upper-bounds
+what any diffusion model operating in that latent space can achieve. We therefore report autoencoder
+reconstruction separately in Table~\ref{tab:autoencoder}, so that the
+segmentation results in Table~\ref{tab:modality} can be read against that
+ceiling.
+
+% ---------------------------------------------------------------------------
+\subsection{Results}
+\label{subsec:results}
+
+% --- Table 1: autoencoder ceiling -----------------------------------------
+% SOURCE: final validation row of the image_vae and mask_vae run logs
+%         (logs/runs/<run_id>/val.csv)
+\begin{table}[t]
+    \centering
+    \caption{Reconstruction fidelity of the frozen autoencoders. The
+    annotation autoencoder bounds the segmentation performance attainable in
+    latent space.}
+    \label{tab:autoencoder}
+    \begin{tabular}{lcccc}
+        \toprule
+        Autoencoder & Dice & IoU & SSIM & PSNR \\
+        \midrule
+        Image ($128^{3} \to 32^{3}$)      & --   & --   & --   & --   \\
+        Annotation ($128^{3} \to 32^{3}$) & --   & --   & --   & --   \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+% --- Table 2: the main result ---------------------------------------------
+% SOURCE: eval_output/<run>/summary.csv, one row per combo.
+% Bit order is (FLAIR, T1ce, T1, T2) -- keep consistent with Sec. 3.1.
+% Delta U is computed against the 1111 row of the same case, then averaged.
+\begin{table}[t]
+    \centering
+    \caption{Segmentation accuracy and predictive uncertainty across all 15
+    modality configurations, grouped by the number of available sequences.
+    $\Delta U$ is the paired increase in uncertainty relative to the fully
+    observed input for the same case.}
+    \label{tab:modality}
+    \begin{tabular}{llcccc}
+        \toprule
+        $|\mathbf{m}|$ & Available sequences & Dice & IoU & $U$ & $\Delta U$ \\
+        \midrule
+        4 & FLAIR + T1ce + T1 + T2 & -- & -- & -- & --   \\
+        \midrule
+        \multirow{4}{*}{3}
+          & FLAIR + T1ce + T1      & -- & -- & -- & -- \\
+          & FLAIR + T1ce + T2      & -- & -- & -- & -- \\
+          & FLAIR + T1 + T2        & -- & -- & -- & -- \\
+          & T1ce + T1 + T2         & -- & -- & -- & -- \\
+        \midrule
+        \multirow{6}{*}{2}
+          & FLAIR + T1ce           & -- & -- & -- & -- \\
+          & FLAIR + T1             & -- & -- & -- & -- \\
+          & FLAIR + T2             & -- & -- & -- & -- \\
+          & T1ce + T1              & -- & -- & -- & -- \\
+          & T1ce + T2              & -- & -- & -- & -- \\
+          & T1 + T2                & -- & -- & -- & -- \\
+        \midrule
+        \multirow{4}{*}{1}
+          & FLAIR                  & -- & -- & -- & -- \\
+          & T1ce                   & -- & -- & -- & -- \\
+          & T1                     & -- & -- & -- & -- \\
+          & T2                     & -- & -- & -- & -- \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+% --- Figure: the central claim, one plot ----------------------------------
+% Uncertainty against number of available sequences. Box plot over cases, or
+% mean with standard error. This figure is the paper's main evidence.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.75\textwidth]{uncertainty_vs_modalities.pdf}
+    \caption{Predictive uncertainty against the number of available sequences.
+    Each case contributes one observation per configuration, so the comparison
+    is paired.}
+    \label{fig:unc-vs-mods}
+\end{figure}
+
+% --- Figure: qualitative --------------------------------------------------
+% From eval_output/<run>/combo_grids/. Rows = configurations, columns = seeds.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{combo_grid.pdf}
+    \caption{Samples for one case under decreasing modality availability.
+    Rows are configurations ordered from most to least informative; columns
+    are independent sampling seeds, followed by the ensemble and the
+    uncertainty map.}
+    \label{fig:combo-grid}
+\end{figure}
+
+% ---------------------------------------------------------------------------
+% WRITING ORDER FOR THIS SUBSECTION once the numbers are in:
+%
+%   (a) Autoencoder ceiling -- one or two sentences on Table 1. State the
+%       annotation reconstruction Dice explicitly; every later number must be
+%       read against it.
+%
+%   (b) Accuracy across configurations -- Table 2, Dice and IoU columns.
+%       Report the drop from four sequences to one. Note which single
+%       sequence performs best; this is an empirical finding, not something
+%       Eq. (dpi) predicts, since those configurations are not nested.
+%
+%   (c) The uncertainty result -- Table 2 U column and Fig. 5. State whether
+%       U increases monotonically in the number of removed sequences, and
+%       give the correlation. This is the claim the paper rests on.
+%
+%   (d) Failure cases -- configurations where accuracy is poor but
+%       uncertainty stays low. These are the miscalibrated cases and reporting
+%       them is more credible than omitting them.
+%
+%   (e) Qualitative -- Fig. 6. Point at the contrast between a thin boundary
+%       band with four sequences and diffuse uncertainty with one.
+% ---------------------------------------------------------------------------
