@@ -16,6 +16,7 @@ Optional flags:
 """
 
 import argparse
+import csv
 from pathlib import Path
 
 import matplotlib
@@ -98,15 +99,19 @@ def evaluate(
     device: torch.device,
     output_dir: Path,
     drop_mods: bool,
+    max_cases: int | None = None,
 ) -> None:
-    n_cases  = min(n_cases, len(dataset))
+    # Every case in the split is scored; only the first n_grid are drawn.
+    n_scored = len(dataset) if max_cases is None else min(max_cases, len(dataset))
+    n_grid   = min(n_cases, n_scored)
+
     # cols per case: for each modality → [orig | recon | (dropped_recon)]
     n_mod_cols = 3 if drop_mods else 2   # orig, recon, (+dropped)
     n_cols = len(MODALITY_NAMES) * n_mod_cols
 
     fig, axes = plt.subplots(
-        n_cases, n_cols,
-        figsize=(n_cols * 2.2, n_cases * 2.5),
+        n_grid, n_cols,
+        figsize=(n_cols * 2.2, n_grid * 2.5),
         squeeze=False,
     )
 
@@ -120,9 +125,15 @@ def evaluate(
     for col, hdr in enumerate(col_headers):
         axes[0][col].set_title(hdr, fontsize=7)
 
+    # Kept per modality, not pooled: the four sequences do not reconstruct
+    # equally well, and a single pooled mean hides which one is the weak link.
+    per_mod: dict[str, dict[str, list[float]]] = {
+        m: {"ssim": [], "psnr": []} for m in MODALITY_NAMES
+    }
     all_ssim, all_psnr = [], []
+    case_names: list[str] = []
 
-    for row in range(n_cases):
+    for row in range(n_scored):
         vol, _ = dataset[row]                     # (4, D, H, W)
         x      = vol.unsqueeze(0).to(device)      # (1, 4, D, H, W)
 
@@ -134,10 +145,11 @@ def evaluate(
         recon_np = recon[0].cpu().float().numpy() # (4, D, H, W)
 
         z = best_signal_slice(vol_np)
+        case_names.append(dataset.names[row])
 
         # --- Dropped-modality reconstruction ---
         dropped_np = None
-        if drop_mods:
+        if drop_mods and row < n_grid:
             mod_mask    = sample_modality_mask(1).to(device)  # random dropout
             vol_masked  = apply_modality_mask(x, mod_mask)
             mu_drop, _  = vae.encode(vol_masked)
@@ -155,12 +167,18 @@ def evaluate(
                 continue
             o_n = torch.from_numpy(norm01(orig)).unsqueeze(0).unsqueeze(0)
             p_n = torch.from_numpy(norm01(pred)).unsqueeze(0).unsqueeze(0)
-            case_ssim.append(ssim_approx(p_n, o_n))
-            case_psnr.append(psnr(p_n, o_n))
+            s, ps = ssim_approx(p_n, o_n), psnr(p_n, o_n)
+            case_ssim.append(s)
+            case_psnr.append(ps)
+            per_mod[MODALITY_NAMES[c]]["ssim"].append(s)
+            per_mod[MODALITY_NAMES[c]]["psnr"].append(ps)
         all_ssim.extend(case_ssim)
         all_psnr.extend(case_psnr)
         mean_ssim = np.mean(case_ssim) if case_ssim else 0.0
         mean_psnr = np.mean(case_psnr) if case_psnr else 0.0
+
+        if row >= n_grid:
+            continue
 
         axes[row][0].set_ylabel(
             f"case {row}\nSSIM={mean_ssim:.3f}\nPSNR={mean_psnr:.1f}dB",
@@ -194,13 +212,35 @@ def evaluate(
     out_path = output_dir / "test_eval_grid.png"
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Grid → {out_path}")
+    print(f"  Grid → {out_path} ({n_grid} of {n_scored} scored cases)")
 
-    print(f"\n{'='*45}")
-    print(f"Reconstruction quality  (n={n_cases} test cases, all modalities present)")
-    print(f"{'='*45}")
-    print(f"  Mean SSIM : {np.mean(all_ssim):.4f}")
-    print(f"  Mean PSNR : {np.mean(all_psnr):.2f} dB")
+    # --- Per-case CSV, so the numbers outlive the Kaggle session ---
+    csv_path = output_dir / "image_vae_metrics.csv"
+    with csv_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["case"] + [f"{m}_{k}" for m in MODALITY_NAMES
+                                          for k in ("ssim", "psnr")])
+        for i, name in enumerate(case_names):
+            row_vals = []
+            for m in MODALITY_NAMES:
+                for k in ("ssim", "psnr"):
+                    v = per_mod[m][k]
+                    row_vals.append(f"{v[i]:.6f}" if i < len(v) else "")
+            w.writerow([name] + row_vals)
+    print(f"  CSV  → {csv_path}")
+
+    print(f"\n{'='*52}")
+    print(f"ImageVAE reconstruction (n={n_scored} cases, all modalities present)")
+    print(f"{'='*52}")
+    print(f"{'Modality':<10} {'SSIM':>10} {'PSNR(dB)':>12}")
+    print("-" * 52)
+    for m in MODALITY_NAMES:
+        s, p = per_mod[m]["ssim"], per_mod[m]["psnr"]
+        if not s:
+            continue
+        print(f"{m:<10} {np.mean(s):>10.4f} {np.mean(p):>12.2f}")
+    print("-" * 52)
+    print(f"{'mean':<10} {np.mean(all_ssim):>10.4f} {np.mean(all_psnr):>12.2f}")
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +253,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--output_dir", default="eval_out/image_vae")
     p.add_argument("--split",      default="test")
-    p.add_argument("--n_cases",    type=int, default=8)
+    p.add_argument("--n_cases",    type=int, default=8,
+                   help="Cases drawn in the PNG grid (metrics use the whole split)")
+    p.add_argument("--max_cases",  type=int, default=None,
+                   help="Cap the cases scored. Omit to score the whole split.")
     p.add_argument("--drop_mods",  action="store_true",
                    help="Show a third column per modality: recon with random modality dropout")
     p.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")
@@ -242,7 +285,8 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    evaluate(vae, dataset, args.n_cases, device, output_dir, args.drop_mods)
+    evaluate(vae, dataset, args.n_cases, device, output_dir, args.drop_mods,
+             max_cases=args.max_cases)
 
 
 if __name__ == "__main__":

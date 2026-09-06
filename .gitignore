@@ -41,3 +41,16 @@ results_*.zip
 *.tar.gz
 *.pth
 data/smoke/
+
+# ── Paper ────────────────────────────────────────────────────────────────────
+# The manuscript is drafted outside this repo. Kept out entirely, along with
+# LaTeX build output, so an unpublished draft is never pushed by accident.
+latex/
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.out
