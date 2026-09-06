@@ -12,21 +12,27 @@
 #  Both write a per-case CSV as well as the console table, so the numbers
 #  survive a Kaggle session ending.
 #
-#  Usage:
-#    bash run_vae_eval.sh                    # whole test split
-#    MAX_CASES=50 bash run_vae_eval.sh       # quick pass
-#    DEVICE=cuda bash run_vae_eval.sh        # on Kaggle
+#  Data is fetched and preprocessed the same way run_smoke.sh does it, into
+#  the same data/smoke cache, so having run either one makes the other skip
+#  straight to inference. Pass checkpoints and nothing else:
 #
-#  On Kaggle, point it at the checkpoints and the data:
 #    export IMAGE_VAE_CKPT=/kaggle/input/.../image_vae/best.pth
 #    export MASK_VAE_CKPT=/kaggle/input/.../mask_vae/best.pth
-#    export DATA_ROOT=/kaggle/input/.../brats_roi128_2023
-#    export SPLITS_DIR=/kaggle/input/.../splits_full
-#    export MAX_CASES=50 DEVICE=cuda
+#    export NUM_CASES=50 DEVICE=cuda
 #    bash run_vae_eval.sh
 #
-#  DATA_ROOT / SPLITS_DIR may be left unset when running on the machine that
-#  trained the checkpoints; the paths recorded inside them are used instead.
+#  !! THE NUMBERS FROM FETCHED DATA ARE NOT VALID PAPER RESULTS. The cases
+#     are whatever came first in the archive, so most were in the training
+#     set and reconstruction fidelity on them is optimistic. For Table 1,
+#     point DATA_ROOT and SPLITS_DIR at the real held-out test split.
+#
+#  Usage:
+#    bash run_vae_eval.sh                    # fetch, then evaluate
+#    NUM_CASES=50 bash run_vae_eval.sh       # more cases
+#    DEVICE=cuda bash run_vae_eval.sh        # on Kaggle
+#    DATA_ROOT=... SPLITS_DIR=... bash run_vae_eval.sh   # real test split
+#
+#  DATA_ROOT / SPLITS_DIR override the fetch entirely when both are set.
 # ============================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -47,17 +53,21 @@ SPLIT="${SPLIT:-test}"
 N_CASES="${N_CASES:-8}"
 MAX_CASES="${MAX_CASES:-}"
 
-# Empty means "use whatever the checkpoint recorded".
+# Same cache and same variable names as run_smoke.sh, so whichever script runs
+# first pays the download and the other skips it.
+NUM_CASES="${NUM_CASES:-10}"
+DATASET="${DATASET:-brats2023}"
+SMOKE_DIR="${SMOKE_DIR:-data/smoke}"
+RAW_DIR="$SMOKE_DIR/raw/$DATASET"
+FULL_DIR="$SMOKE_DIR/full"
+PROC_DIR="$SMOKE_DIR/roi128"
+SMOKE_SPLITS="$SMOKE_DIR/splits"
+
+# Set both to evaluate on real data instead of the fetched sample.
 DATA_ROOT="${DATA_ROOT:-}"
 SPLITS_DIR="${SPLITS_DIR:-}"
 
 banner() { echo ""; echo "════════════════════════════════════════════"; echo "  $*"; echo "════════════════════════════════════════════"; }
-
-# Shared flags, built once so the two runs cannot drift apart.
-COMMON=(--split "$SPLIT" --n_cases "$N_CASES" --device "$DEVICE")
-[ -n "$MAX_CASES"  ] && COMMON+=(--max_cases  "$MAX_CASES")
-[ -n "$DATA_ROOT"  ] && COMMON+=(--data_root  "$DATA_ROOT")
-[ -n "$SPLITS_DIR" ] && COMMON+=(--splits_dir "$SPLITS_DIR")
 
 # ════════════════════════════════════════════════════════════
 banner "Step 0 — Checks"
@@ -71,9 +81,6 @@ done
 
 echo "  device  $DEVICE"
 echo "  split   $SPLIT"
-echo "  cases   ${MAX_CASES:-all}  (grid draws $N_CASES)"
-echo "  data    ${DATA_ROOT:-<from checkpoint>}"
-echo "  splits  ${SPLITS_DIR:-<from checkpoint>}"
 
 # What the checkpoints expect, so a path mismatch is visible here rather than
 # as a confusing failure several steps later.
@@ -86,7 +93,69 @@ for p in sys.argv[1:]:
 PY
 
 # ════════════════════════════════════════════════════════════
-banner "Step 1 — MaskVAE  (Dice, IoU, SSIM, PSNR)"
+banner "Step 1 — Data"
+# ════════════════════════════════════════════════════════════
+if [ -n "$DATA_ROOT" ] && [ -n "$SPLITS_DIR" ]; then
+    echo "[1] Using the data given: $DATA_ROOT"
+    echo "    splits: $SPLITS_DIR"
+    FETCHED=0
+else
+    [ -z "$DATA_ROOT$SPLITS_DIR" ] || {
+        echo "Set both DATA_ROOT and SPLITS_DIR, or neither."; exit 1; }
+
+    # Same steps and same cache as run_smoke.sh, so running either one first
+    # means the other skips the download.
+    if [ -d "$PROC_DIR/vol" ] && [ "$(ls -A "$PROC_DIR/vol" 2>/dev/null)" ]; then
+        echo "[1] Already prepared — skipping  ($PROC_DIR)"
+    else
+        if [ -d "$RAW_DIR" ] && [ "$(ls -A "$RAW_DIR" 2>/dev/null)" ]; then
+            echo "[1] Already fetched — skipping  ($RAW_DIR)"
+        else
+            echo "[1] Fetching $NUM_CASES cases from HuggingFace"
+            python3 scripts/fetch_sample_cases.py \
+                --dataset    "$DATASET" \
+                --num_cases  "$NUM_CASES" \
+                --output_dir "$RAW_DIR"
+        fi
+
+        echo "[1] Preprocessing → 128³ ROI crops"
+        python3 scripts/preprocess_brats.py \
+            --data_root  "$RAW_DIR" \
+            --output_dir "$FULL_DIR"
+        python3 scripts/preprocess_roi.py \
+            --data_root  "$FULL_DIR" \
+            --output_dir "$PROC_DIR" \
+            --crop_size  128
+        # Full-res intermediates are ~143 MB per case and no longer needed.
+        rm -rf "$FULL_DIR"
+    fi
+
+    # Every fetched case goes in test: a 70/20/10 split of this few would
+    # leave one case to evaluate.
+    mkdir -p "$SMOKE_SPLITS"
+    python3 - "$PROC_DIR" "$SMOKE_SPLITS" <<'PY'
+import sys
+from pathlib import Path
+proc, splits = Path(sys.argv[1]), Path(sys.argv[2])
+names = sorted(p.name.replace("_vol.npy", "") for p in (proc / "vol").glob("*_vol.npy"))
+if not names:
+    raise SystemExit(f"No cases found in {proc/'vol'}")
+for fn in ("test.txt", "train.txt", "val.txt"):
+    (splits / fn).write_text("\n".join(names))
+print(f"  {len(names)} cases → {splits}/test.txt")
+PY
+    DATA_ROOT="$PROC_DIR"
+    SPLITS_DIR="$SMOKE_SPLITS"
+    FETCHED=1
+fi
+
+# Shared flags, built once so the two runs cannot drift apart.
+COMMON=(--split "$SPLIT" --n_cases "$N_CASES" --device "$DEVICE"
+        --data_root "$DATA_ROOT" --splits_dir "$SPLITS_DIR")
+[ -n "$MAX_CASES" ] && COMMON+=(--max_cases "$MAX_CASES")
+
+# ════════════════════════════════════════════════════════════
+banner "Step 2 — MaskVAE  (Dice, IoU, SSIM, PSNR)"
 # ════════════════════════════════════════════════════════════
 # The annotation ceiling. Channel width is read from the checkpoint, so this
 # handles both the 3-channel region model and the 4-channel subregion one.
@@ -96,7 +165,7 @@ python3 -m eval.eval_mask_vae \
     "${COMMON[@]}"
 
 # ════════════════════════════════════════════════════════════
-banner "Step 2 — ImageVAE  (SSIM, PSNR per sequence)"
+banner "Step 3 — ImageVAE  (SSIM, PSNR per sequence)"
 # ════════════════════════════════════════════════════════════
 # --drop_mods additionally reconstructs from a random modality subset, which
 # is the condition the diffusion model actually operates under.
@@ -107,7 +176,7 @@ python3 -m eval.eval_image_vae \
     "${COMMON[@]}"
 
 # ════════════════════════════════════════════════════════════
-banner "Step 3 — Package results"
+banner "Step 4 — Package results"
 # ════════════════════════════════════════════════════════════
 # One file to grab from Kaggle's Output tab.
 ZIP_PATH="${ZIP_PATH:-$OUT_DIR/../vae_eval_results.zip}"
@@ -118,7 +187,13 @@ echo "  $(du -h "$ZIP_PATH" | cut -f1)  →  $ZIP_PATH"
 # ════════════════════════════════════════════════════════════
 banner "Done"
 # ════════════════════════════════════════════════════════════
-echo "  Tables above are the autoencoder ceiling for the paper."
+if [ "$FETCHED" = "1" ]; then
+    echo "  !! These came from fetched sample cases, most of which were in the"
+    echo "     training set. NOT valid Table 1 numbers -- for those, set"
+    echo "     DATA_ROOT and SPLITS_DIR to the real held-out test split."
+else
+    echo "  Tables above are the autoencoder ceiling for the paper."
+fi
 echo ""
 echo "  CSVs:"
 find "$OUT_DIR" -name "*_metrics.csv" | sed 's|^|    |'
