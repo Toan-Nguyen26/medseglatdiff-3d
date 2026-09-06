@@ -101,6 +101,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_inference_steps", type=int,   default=50,
                    help="DDIM steps per sample. 50 ≈ 1000-step DDPM quality.")
     p.add_argument("--threshold",           type=float, default=0.5)
+    p.add_argument("--transparent",         action="store_true",
+                   help="Save figures with a transparent background. Panels "
+                        "stay opaque; only the margins become see-through.")
 
     p.add_argument("--modality_mask", default="all",
                    help="'all' = all present | '1101' = specific combo | 'random'.")
@@ -649,6 +652,7 @@ def save_combo_grid(
     case_name: str,
     panels:    list[tuple[str, dict, dict]],   # (label, slices, metrics) per combo
     save_path: Path,
+    transparent: bool = False,
 ) -> None:
     """
     One figure per case. Rows are modality combinations, ordered as given;
@@ -728,7 +732,10 @@ def save_combo_grid(
     )
     plt.tight_layout(rect=(0, 0, 1, 0.97))
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=110, bbox_inches="tight")
+    # transparent=True clears the figure and axes patches only. The panels are
+    # drawn images, so they stay opaque -- it is the surrounding margin and the
+    # gaps between panels that become see-through.
+    fig.savefig(save_path, dpi=110, bbox_inches="tight", transparent=transparent)
     plt.close(fig)
 
 
@@ -928,6 +935,7 @@ def main() -> None:
                 save_combo_grid(
                     case_name, panels,
                     grid_dir / f"{case_name[:20]}_combos_n{args.n_samples}.png",
+                    transparent=args.transparent,
                 )
             print(f"Combo grids→ {grid_dir}  ({len(slice_sink)} cases)")
 
