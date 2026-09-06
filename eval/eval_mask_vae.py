@@ -350,9 +350,16 @@ def main() -> None:
     print(f"Step       : {torch.load(args.checkpoint, map_location='cpu', weights_only=True)['step']}")
     print(f"Best Dice  : {torch.load(args.checkpoint, map_location='cpu', weights_only=True).get('best_mean_dice', 'N/A')}")
 
-    latent_ch = cfg["latent_channels"]
-    spatial   = cfg["crop_size"] // 8          # 8x downsampling → 16 for 128³
-    latent_shape = (latent_ch, spatial, spatial, spatial)
+    # Derive the latent shape by encoding one real case instead of assuming a
+    # downsampling factor. The factor was hardcoded to 8, but this
+    # architecture -- channels "32,64,128", so two downsampling stages -- is
+    # 4x. The prior samples were therefore decoded at 64³ against a 128³
+    # ground truth, which only surfaced when the chosen tumour slice happened
+    # to fall beyond 64.
+    with torch.no_grad():
+        _, probe = dataset[0]
+        mu_probe, _ = vae.encode(probe.unsqueeze(0).to(device))
+    latent_shape = tuple(mu_probe.shape[1:])
     print(f"Latent     : {latent_shape}")
 
     output_dir = Path(args.output_dir)
