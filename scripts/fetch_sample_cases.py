@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dataset", choices=sorted(HF_URLS), default="brats2023")
     p.add_argument("--num_cases", type=int, default=6,
                    help="Number of complete cases to pull.")
+    p.add_argument("--cases", default=None,
+                   help="Comma-separated case names to pull instead of the first "
+                        "--num_cases, e.g. BraTS-GLI-01023-000. The archive is "
+                        "streamed until every named case is complete, so a case "
+                        "that sits late in the archive can take a while.")
     p.add_argument("--output_dir", required=True,
                    help="Where to write the case folders.")
     p.add_argument("--url", default=None,
@@ -82,7 +87,7 @@ def main() -> None:
     url = args.url or HF_URLS[args.dataset]
     print(f"Source     : {url}")
     print(f"Target     : {out}")
-    print(f"Cases      : {args.num_cases}\n")
+    print(f"Cases      : {args.cases or args.num_cases}\n")
 
     if url.startswith(("http://", "https://")):
         stream = urllib.request.urlopen(url)
@@ -92,6 +97,9 @@ def main() -> None:
     counts: dict[str, int] = {}
     order:  list[str] = []
     written = 0
+    wanted  = ({c.strip() for c in args.cases.split(",") if c.strip()}
+               if args.cases else None)
+    scanned = 0
 
     try:
         # "r|" is the streaming mode — no seeking, so it works on a socket.
@@ -104,7 +112,22 @@ def main() -> None:
                 if case is None:
                     continue
 
-                if case not in counts:
+                if wanted is not None:
+                    # Named mode: skip every other case, and stop as soon as
+                    # each named case has all of its files.
+                    if case not in wanted:
+                        if order and all(counts.get(c, 0) >= EXPECTED_PER_CASE
+                                         for c in wanted):
+                            break
+                        scanned += 1
+                        if scanned % 2000 == 0:
+                            print(f"  ...skipped {scanned} files from other cases")
+                        continue
+                    if case not in counts:
+                        counts[case] = 0
+                        order.append(case)
+                        print(f"  found {case}")
+                elif case not in counts:
                     # Reached a case beyond the ones we want — everything
                     # earlier is already complete, so stop reading.
                     if len(order) >= args.num_cases:
@@ -127,6 +150,8 @@ def main() -> None:
     finally:
         stream.close()
 
+    if wanted is not None and wanted - set(order):
+        print(f"\n  not found in archive: {sorted(wanted - set(order))}")
     complete   = [c for c in order if counts[c] >= EXPECTED_PER_CASE]
     incomplete = [c for c in order if counts[c] < EXPECTED_PER_CASE]
 

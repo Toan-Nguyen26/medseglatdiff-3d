@@ -35,6 +35,7 @@ Full 15-combo sweep (A100, full test split):
 
 import argparse
 import csv
+import zlib
 from pathlib import Path
 
 import matplotlib
@@ -74,6 +75,19 @@ FOCUSED_COMBOS: list[tuple[tuple[bool, ...], str]] = [
     ((False, False, False, True ), "T2 alone"),
 ]
 
+# The seven rows of the combo-grid figure in the paper, in the same order, so
+# --combo_set paper reproduces that figure directly. Bit order follows
+# MODALITY_NAMES: (FLAIR, T1ce, T1, T2).
+PAPER_COMBOS: list[tuple[tuple[bool, ...], str]] = [
+    ((True,  False, False, False), "FLAIR alone"),
+    ((False, True,  False, False), "T1ce alone"),
+    ((False, False, True,  False), "T1 alone"),
+    ((False, False, False, True ), "T2 alone"),
+    ((False, False, True,  True ), "T1 + T2"),
+    ((False, True,  True,  True ), "all but FLAIR"),
+    ((True,  True,  True,  True ), "all four"),
+]
+
 
 # ---------------------------------------------------------------------------
 # Args
@@ -91,6 +105,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--test_split_file", default="test.txt")
     p.add_argument("--num_cases",  type=int, default=None,
                    help="Number of test cases. Default: all in test.txt.")
+    p.add_argument("--cases", default=None,
+                   help="Comma-separated case names to evaluate, e.g. "
+                        "BraTS-GLI-01023-000. Overrides --num_cases and the "
+                        "split file, so a named case runs even when it is not "
+                        "in test.txt; a warning is printed if it is not.")
 
     # Override VAE paths (optional — defaults to what's stored in the diffusion ckpt)
     p.add_argument("--image_vae_ckpt", default=None)
@@ -101,6 +120,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_inference_steps", type=int,   default=50,
                    help="DDIM steps per sample. 50 ≈ 1000-step DDPM quality.")
     p.add_argument("--threshold",           type=float, default=0.5)
+    p.add_argument("--seed",                type=int,   default=42,
+                   help="Seed for the sampling noise. Sample i of a case always "
+                        "starts from the same noise for a given seed, whatever the "
+                        "modality configuration, combo order or sharding, so rows "
+                        "of a combo grid differ only in the input.")
     p.add_argument("--transparent",         action="store_true",
                    help="Save figures with a transparent background. Panels "
                         "stay opaque; only the margins become see-through.")
@@ -109,9 +133,11 @@ def parse_args() -> argparse.Namespace:
                    help="'all' = all present | '1101' = specific combo | 'random'.")
     p.add_argument("--all_combos", action="store_true",
                    help="Sweep all 15 modality combinations and write summary table.")
-    p.add_argument("--combo_set", choices=["focused"], default=None,
+    p.add_argument("--combo_set", choices=["focused", "paper"], default=None,
                    help="Sweep a named subset instead of all 15. 'focused' is 7 "
-                        "combos spanning 4/3/2/1 modalities — see FOCUSED_COMBOS.")
+                        "combos spanning 4/3/2/1 modalities — see FOCUSED_COMBOS. "
+                        "'paper' is the 7 rows of the paper's combo-grid "
+                        "figure, in figure order — see PAPER_COMBOS.")
     p.add_argument("--num_shards", type=int, default=1,
                    help="Split the case list across N processes (one per GPU). "
                         "Merge the results with scripts/merge_shards.py.")
@@ -231,13 +257,17 @@ def ddim_sample(
     *,
     device:    torch.device,
     n_steps:   int = 50,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     T   = schedule.num_timesteps
     gap = max(T // n_steps, 1)
     ts  = list(reversed(range(0, T, gap)))
     ab  = schedule.alpha_bars
 
-    x_t = torch.randn(latent_shape, device=device)
+    # Drawn on the CPU so the same seed gives the same noise on CPU, CUDA and
+    # MPS, whose generators do not produce matching streams.
+    x_t = (torch.randn(latent_shape, generator=generator).to(device)
+           if generator is not None else torch.randn(latent_shape, device=device))
     for i, t_curr in enumerate(ts):
         t_prev   = ts[i + 1] if i + 1 < len(ts) else -1
         t_batch  = torch.full((latent_shape[0],), t_curr, device=device, dtype=torch.long)
@@ -269,6 +299,8 @@ def infer_n_samples(
     device:     torch.device,
     subregion:  bool,
     use_amp:    bool,
+    seed:       int | None = None,
+    case_name:  str = "",
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Returns:
@@ -286,9 +318,15 @@ def infer_n_samples(
     latent_shape = (1, mask_vae.latent_channels, *mu_img.shape[2:])
     samples = []
 
-    for _ in range(n_samples):
+    for i in range(n_samples):
+        # The configuration is deliberately left out of the seed, so a case's
+        # i-th sample starts from identical noise under every configuration.
+        gen = None
+        if seed is not None:
+            gen = torch.Generator().manual_seed(
+                (seed * 1_000_003 + zlib.crc32(case_name.encode()) * 101 + i) % 2**63)
         z0 = ddim_sample(unet, schedule, mu_img, latent_shape,
-                         device=device, n_steps=n_inf_steps)
+                         device=device, n_steps=n_inf_steps, generator=gen)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
             logits = mask_vae.decode(z0)
         # .float() before .numpy(): NumPy has no bfloat16 dtype.
@@ -606,6 +644,7 @@ def extract_slices(
     stack_np: np.ndarray,    # (N, 3, H, W, D)
     unc_np:   np.ndarray,    # (3, H, W, D)
     regions:  list[str] | None = None,
+    mod_present: list[bool] | None = None,
 ) -> dict:
     """
     Reduce one (case, combo) result to the 2D panels its figure row needs.
@@ -618,6 +657,9 @@ def extract_slices(
     wt_only = regions == ["WT"]
     z       = best_slice(gt_np)
     flair   = vol_np[0, :, :, z]
+
+    def norm(img: np.ndarray) -> np.ndarray:
+        return (img - img.min()) / (img.max() - img.min() + 1e-6)
 
     def rgb(wt, tc, et):
         # In WT-only mode the composite would render TC and ET on top of WT
@@ -632,7 +674,14 @@ def extract_slices(
 
     return {
         "z":       z,
-        "flair":   (flair - flair.min()) / (flair.max() - flair.min() + 1e-6),
+        "flair":   norm(flair),
+        # vol_np is the unmasked volume, so every sequence can be drawn and
+        # the ones withheld from the model are greyed out rather than absent.
+        # That makes each row state its own input instead of the reader having
+        # to decode the row label.
+        "mods":        [norm(vol_np[c, :, :, z]) for c in range(len(MODALITY_NAMES))],
+        "mod_present": list(mod_present) if mod_present is not None
+                       else [True] * len(MODALITY_NAMES),
         "gt_mask": gt_np[unc_idx, :, :, z],           # for the contour overlay
         "gt":      rgb(gt_np[0, :, :, z], gt_np[1, :, :, z], gt_np[2, :, :, z]),
         "samples": [
@@ -668,13 +717,16 @@ def save_combo_grid(
 
     n_rows    = len(panels)
     n_samples = len(panels[0][1]["samples"])
-    n_cols    = 2 + n_samples + 2      # FLAIR | GT | s1..sN | ensemble | unc
+    n_mods    = len(MODALITY_NAMES)
+    # The four sequences replace the old single FLAIR column rather than being
+    # added alongside it, which would have drawn FLAIR twice side by side.
+    n_cols    = n_mods + 1 + n_samples + 2   # mods | GT | s1..sN | ensemble | unc
 
     fig, axes = plt.subplots(n_rows, n_cols,
                              figsize=(n_cols * 1.9, n_rows * 2.15),
                              squeeze=False)
 
-    col_titles = (["FLAIR", "GT"]
+    col_titles = (list(MODALITY_NAMES) + ["GT"]
                   + [f"s{i+1}" for i in range(n_samples)]
                   + ["ensemble", "uncertainty"])
 
@@ -688,13 +740,30 @@ def save_combo_grid(
     unc_vmax = max(unc_vmax, 1e-6)
 
     for row, (label, sl, metrics) in enumerate(panels):
-        cells = ([("gray", sl["flair"]), ("rgb", sl["gt"])]
+        mods    = sl.get("mods") or [sl["flair"]] * n_mods
+        present = sl.get("mod_present") or [True] * n_mods
+
+        cells = ([("mod", (m, p)) for m, p in zip(mods, present)]
+                 + [("rgb", sl["gt"])]
                  + [("rgb", s) for s in sl["samples"]]
                  + [("rgb", sl["ensemble"]), ("unc", sl["unc"])])
 
         for col, (kind, img) in enumerate(cells):
             ax = axes[row][col]
-            if kind == "gray":
+            if kind == "mod":
+                slice_img, is_present = img
+                if is_present:
+                    ax.imshow(slice_img, cmap="gray", vmin=0, vmax=1)
+                else:
+                    # A flat field, not a dimmed image: the model was given
+                    # nothing here, and showing faint anatomy would suggest it
+                    # had something to work with.
+                    ax.imshow(np.full_like(slice_img, 0.30),
+                              cmap="gray", vmin=0, vmax=1)
+                    ax.text(0.5, 0.5, "missing", transform=ax.transAxes,
+                            ha="center", va="center", fontsize=7,
+                            color="#cc0000", fontweight="bold")
+            elif kind == "gray":
                 ax.imshow(img, cmap="gray")
             elif kind == "unc":
                 # Anatomy underneath, uncertainty over it with alpha tied to
@@ -760,6 +829,7 @@ def eval_combo(
     slice_sink:    dict | None = None,
     slice_cases:   set[str] | None = None,
     regions:       list[str] | None = None,
+    seed:          int | None = None,
 ) -> list[dict]:
     """
     `slice_sink`, when given, collects the 2D panels needed for the per-case
@@ -785,6 +855,7 @@ def eval_combo(
             unet, image_vae, mask_vae, schedule, vol_t,
             n_samples=n_samples, n_inf_steps=n_inf_steps,
             device=device, subregion=subregion, use_amp=use_amp,
+            seed=seed, case_name=name,
         )
         gt_np = seg_to_regions(seg)   # (3,H,W,D) [WT,TC,ET]
 
@@ -800,7 +871,10 @@ def eval_combo(
 
         if slice_sink is not None and (slice_cases is None or name in slice_cases):
             slice_sink.setdefault(name, []).append(
-                (mod_label, extract_slices(vol_cf, gt_np, stack_np, unc_np, regions), metrics)
+                (mod_label,
+                 extract_slices(vol_cf, gt_np, stack_np, unc_np, regions,
+                                mod_present=mod_present),
+                 metrics)
             )
 
         row = {"case": name, "combo": combo_str,
@@ -831,9 +905,27 @@ def main() -> None:
     if args.regions == "wt":
         print("\nRegions    : WT only (binary whole-tumour setting)")
 
-    all_names = _read_names(splits_dir / args.test_split_file)
-    if args.num_cases:
-        all_names = all_names[:args.num_cases]
+    split_path = splits_dir / args.test_split_file
+    if args.cases:
+        all_names = [c.strip() for c in args.cases.split(",") if c.strip()]
+        missing = [c for c in all_names if not (vol_dir / f"{c}_vol.npy").exists()]
+        if missing:
+            raise SystemExit(f"Not found in {vol_dir}: {missing}")
+        # A named case bypasses the split, so say plainly when it is not a test
+        # case: scores on a training case are not test results.
+        if split_path.exists():
+            in_test = set(_read_names(split_path))
+            for c in all_names:
+                if c not in in_test:
+                    print(f"  [warn] {c} is not in {split_path}; if it was "
+                          f"used for training, its scores are not test results")
+        else:
+            print(f"  [note] {split_path} not found; test-split membership "
+                  f"of {all_names} was not checked")
+    else:
+        all_names = _read_names(split_path)
+        if args.num_cases:
+            all_names = all_names[:args.num_cases]
 
     # Shard by case for multi-GPU runs. Every (case, combo) is independent, so
     # one process per GPU over a stride-slice of the cases needs no
@@ -849,6 +941,7 @@ def main() -> None:
     print(f"\nTest cases : {len(all_names)}")
     print(f"N samples  : {args.n_samples}")
     print(f"DDIM steps : {args.num_inference_steps}")
+    print(f"Seed       : {args.seed}")
     print(f"Output     : {output_dir}\n")
 
     if args.all_combos or args.combo_set:
@@ -857,10 +950,11 @@ def main() -> None:
         all_rows: list[dict] = []
         summary:  list[dict] = []
 
-        if args.combo_set == "focused":
-            combo_list = [c for c, _ in FOCUSED_COMBOS]
-            print(f"\nCombo set 'focused' ({len(combo_list)} of 15):")
-            for combo, why in FOCUSED_COMBOS:
+        if args.combo_set in ("focused", "paper"):
+            chosen = FOCUSED_COMBOS if args.combo_set == "focused" else PAPER_COMBOS
+            combo_list = [c for c, _ in chosen]
+            print(f"\nCombo set '{args.combo_set}' ({len(combo_list)} of 15):")
+            for combo, why in chosen:
                 bits  = "".join("1" if c else "0" for c in combo)
                 label = "+".join(m for m, c in zip(MODALITY_NAMES, combo) if c)
                 print(f"  {bits}  {label:<22}  {why}")
@@ -889,6 +983,7 @@ def main() -> None:
                 slice_sink=slice_sink,
                 slice_cases=slice_cases,
                 regions=regions,
+                seed=args.seed,
             )
             all_rows.extend(rows)
 
@@ -963,6 +1058,7 @@ def main() -> None:
             device=device, subregion=subregion, use_amp=use_amp,
             output_dir=output_dir, combo_str=combo_str,
             save_vis_flag=True,
+            seed=args.seed,
         )
 
         # Print per-case table
