@@ -46,6 +46,13 @@ LABEL_COLOURS = {0: (0, 0, 0), 1: (0, 0, 200), 2: (0, 200, 0), 4: (200, 0, 0)}
 # NCR is ~2% of voxels → upweight heavily so it's not ignored
 SUBREGION_POS_WEIGHT = torch.tensor([0.1, 10.0, 3.0, 5.0])
 
+# pos_weight for 1-channel binary whole-tumour mode.
+# Whole tumour is ~4.9% of a 128^3 ROI crop, so background outnumbers it about
+# 19:1. Unweighted BCE on that ratio is minimised close to the empty mask, and
+# in the 3-channel path no weight was applied at all. Inverse frequency (19.6)
+# overshoots and destabilises early training, so we take its square root.
+WT_POS_WEIGHT = torch.tensor([4.4])
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -61,6 +68,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mask_vae_channels", type=str, default="32,64,128,128",
                         help="Comma-separated channel progression for MaskVAE encoder/decoder.")
     parser.add_argument("--num_res_units",     type=int, default=2)
+    parser.add_argument("--wt_only",           action="store_true",
+                        help="Train on the single binary whole-tumour mask "
+                             "S = 1[Y > 0] rather than 3 regions or 4 "
+                             "subregions. This is the target the whole-tumour "
+                             "experiments actually evaluate.")
+    parser.add_argument("--use_dice",          action="store_true",
+                        help="Add a soft Dice term to the reconstruction loss. "
+                             "Off by default: the reported results use weighted "
+                             "cross-entropy alone, as MedSegLatDiff does.")
     parser.add_argument("--subregion_mode",    action="store_true",
                         help="Predict 4-ch [BG,NCR,ED,ET] instead of 3-ch [WT,TC,ET]. "
                              "Gives NCR its own channel and loss gradient.")
@@ -110,9 +126,13 @@ def run_val_metrics(
     val_cases: list[torch.Tensor],
     device: torch.device,
     subregion_mode: bool = False,
+    wt_only: bool = False,
 ) -> dict[str, float]:
     vae.eval()
-    scores: dict[str, list[float]] = {r: [] for r in REGION_NAMES}
+    # In binary mode there is one channel and it is WT, so scoring TC and ET
+    # would index past the end of the tensor.
+    names  = ["WT"] if wt_only else REGION_NAMES
+    scores: dict[str, list[float]] = {r: [] for r in names}
 
     for gt in val_cases:
         gt = gt.to(device)
@@ -128,10 +148,10 @@ def run_val_metrics(
             recon_regions = recon_bin
             gt_regions    = gt_np
 
-        for i, r in enumerate(REGION_NAMES):
+        for i, r in enumerate(names):
             scores[r].append(_dice(recon_regions[i].astype(bool), gt_regions[i].astype(bool)))
 
-    metrics = {r: float(np.mean(scores[r])) for r in REGION_NAMES}
+    metrics = {r: float(np.mean(scores[r])) for r in names}
     metrics["mean"] = float(np.mean(list(metrics.values())))
     return metrics
 
@@ -156,6 +176,10 @@ def _best_tumour_slice(gt: np.ndarray) -> int:
 
 def _to_seg(arr: np.ndarray, subregion_mode: bool) -> np.ndarray:
     """Convert VAE output channels to a (D,H,W) label map for visualisation."""
+    if arr.shape[0] == 1:
+        # Binary whole-tumour mode: one channel, drawn in the oedema colour so
+        # the existing palette still applies.
+        return np.where(arr[0] > 0.5, 2, 0).astype(np.uint8)
     if subregion_mode:
         # arr: (4,D,H,W) [BG,NCR,ED,ET] — direct label assignment
         seg = np.zeros(arr.shape[1:], dtype=np.uint8)
@@ -219,9 +243,12 @@ def main() -> None:
     device     = torch.device(args.device)
     splits_dir = args.splits_dir or args.data_root
 
-    num_classes = 4 if args.subregion_mode else 3
+    if args.wt_only and args.subregion_mode:
+        raise SystemExit("--wt_only and --subregion_mode are mutually exclusive.")
+    num_classes = 1 if args.wt_only else (4 if args.subregion_mode else 3)
     channels    = tuple(int(c) for c in args.mask_vae_channels.split(","))
-    pos_weight  = SUBREGION_POS_WEIGHT if args.subregion_mode else None
+    pos_weight  = (WT_POS_WEIGHT if args.wt_only
+                   else SUBREGION_POS_WEIGHT if args.subregion_mode else None)
 
     vae = MaskVAE(
         num_classes=num_classes,
@@ -245,7 +272,8 @@ def main() -> None:
         split_file=os.path.join(splits_dir, args.split_file),
         crop_size=args.crop_size,
         subregion_based=args.subregion_mode,
-        region_based=not args.subregion_mode,
+        region_based=not (args.subregion_mode or args.wt_only),
+        wt_only=args.wt_only,
     )
     loader = DataLoader(
         dataset,
@@ -264,7 +292,8 @@ def main() -> None:
             split_file=val_path,
             crop_size=args.crop_size,
             subregion_based=args.subregion_mode,
-            region_based=not args.subregion_mode,
+            region_based=not (args.subregion_mode or args.wt_only),
+            wt_only=args.wt_only,
             random_crop=False,
         )
         for i in range(min(args.num_val_cases, len(val_ds))):
@@ -286,7 +315,12 @@ def main() -> None:
 
     spatial = args.crop_size // 8
     print(f"Training cases  : {len(dataset)}")
-    print(f"Mask channels   : {num_classes}  ({'subregion [BG,NCR,ED,ET]' if args.subregion_mode else 'region [WT,TC,ET]'})")
+    _mode = ("binary [WT]" if args.wt_only
+             else "subregion [BG,NCR,ED,ET]" if args.subregion_mode
+             else "region [WT,TC,ET]")
+    print(f"Mask channels   : {num_classes}  ({_mode})")
+    print(f"pos_weight      : {pos_weight.tolist() if pos_weight is not None else 'none'}")
+    print(f"Recon loss      : {'weighted BCE + soft Dice' if args.use_dice else 'weighted BCE'}")
     print(f"Latent          : {args.latent_channels}ch × {spatial}³")
     print(f"Total steps     : {total_steps}")
 
@@ -317,7 +351,8 @@ def main() -> None:
 
             recon_logits, mu, logvar = vae(mask)
             total, r_loss, k_loss = mask_vae_loss(
-                recon_logits, mask, mu, logvar, beta=beta, pos_weight=pos_weight
+                recon_logits, mask, mu, logvar, beta=beta,
+                pos_weight=pos_weight, use_dice=args.use_dice
             )
 
             optimizer.zero_grad()
@@ -349,7 +384,9 @@ def main() -> None:
                 )
 
             if step % args.val_every == 0 and step > start_step and val_cases:
-                metrics = run_val_metrics(vae, val_cases, device, subregion_mode=args.subregion_mode)
+                metrics = run_val_metrics(vae, val_cases, device,
+                                          subregion_mode=args.subregion_mode,
+                                          wt_only=args.wt_only)
                 logger.log_metrics(step=step, csv="val", **metrics)
 
                 is_best = metrics["mean"] > best_mean_dice
@@ -375,7 +412,7 @@ def main() -> None:
 
                 tqdm.write(
                     f"  [val]  Dice — "
-                    + "  ".join(f"{r}={metrics[r]:.3f}" for r in REGION_NAMES)
+                    + "  ".join(f"{r}={v:.3f}" for r, v in metrics.items() if r != "mean")
                     + f"  mean={metrics['mean']:.3f}"
                     + ("  ← best" if is_best else "")
                     + es_status

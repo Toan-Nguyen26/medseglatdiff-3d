@@ -311,9 +311,15 @@ def mask_vae_recon_loss(
     recon_logits: torch.Tensor,
     gt_masks: torch.Tensor,
     pos_weight: torch.Tensor | None = None,
+    use_dice: bool = False,
 ) -> torch.Tensor:
     """
-    Dice + BCE for binary mask reconstruction.
+    Weighted binary cross-entropy for mask reconstruction, optionally plus a
+    soft Dice term.
+
+    Dice was previously added unconditionally. The reported results use
+    weighted cross-entropy alone, as MedSegLatDiff does, so it is now opt-in
+    via use_dice; the paper's Eq. (4) describes the default.
 
     Works for both mask formats:
       - 3-channel [WT, TC, ET]  (region_based)
@@ -330,6 +336,9 @@ def mask_vae_recon_loss(
         bce = F.binary_cross_entropy_with_logits(recon_logits, gt_masks, pos_weight=pw)
     else:
         bce = F.binary_cross_entropy_with_logits(recon_logits, gt_masks)
+
+    if not use_dice:
+        return bce
 
     probs = recon_logits.sigmoid()
     eps   = 1e-5
@@ -348,11 +357,13 @@ def mask_vae_loss(
     logvar: torch.Tensor,
     beta: float = 1e-4,
     pos_weight: torch.Tensor | None = None,
+    use_dice: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Combined MaskVAE loss = mask_vae_recon_loss + beta * kl_loss.
     Returns (total, recon_loss, kl).
     """
-    r_loss = mask_vae_recon_loss(recon_logits, gt_masks, pos_weight=pos_weight)
+    r_loss = mask_vae_recon_loss(recon_logits, gt_masks,
+                                 pos_weight=pos_weight, use_dice=use_dice)
     k_loss = kl_loss(mu, logvar)
     return r_loss + beta * k_loss, r_loss, k_loss

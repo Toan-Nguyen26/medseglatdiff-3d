@@ -75,6 +75,17 @@ def seg_to_regions(label: np.ndarray) -> np.ndarray:
     return np.stack([WT, TC, ET], axis=0)
 
 
+def seg_to_wt(label: np.ndarray) -> np.ndarray:
+    """
+    Convert a BraTS label map to the single binary whole-tumour mask.
+
+    Returns float32 of shape (1, H, W, D). This is the target the paper
+    describes -- S = 1[Y > 0] -- as opposed to the 3- and 4-channel forms,
+    which carry tumour subregions the whole-tumour experiments never use.
+    """
+    return (label > 0).astype(np.float32)[None]
+
+
 def seg_to_subregions(label: np.ndarray) -> np.ndarray:
     """
     Convert a BraTS label map to 4 binary subregion masks [BG, NCR, ED, ET].
@@ -133,6 +144,7 @@ class BraTSDataset(Dataset):
         random_crop: bool = True,
         region_based: bool = False,
         subregion_based: bool = False,
+        wt_only: bool = False,
         volume_only: bool = False,
         roi_crop_ratio: float = 0.0,
         roi_max_offset: int = 20,
@@ -143,6 +155,7 @@ class BraTSDataset(Dataset):
         self.random_crop = random_crop
         self.region_based = region_based
         self.subregion_based = subregion_based
+        self.wt_only = wt_only
         self.volume_only = volume_only
         self.roi_crop_ratio = roi_crop_ratio
         self.roi_max_offset = roi_max_offset
@@ -256,7 +269,10 @@ class BraTSDataset(Dataset):
         volume = np.ascontiguousarray(volume.transpose(3, 0, 1, 2)).astype(np.float32)  # (4, H, W, D)
         volume_t = torch.from_numpy(volume)
 
-        if self.subregion_based:
+        if self.wt_only:
+            # Returns (1, H, W, D) float32: the binary whole-tumour mask.
+            mask = torch.from_numpy(seg_to_wt(label))
+        elif self.subregion_based:
             # Returns (4, H, W, D) float32: [BG, NCR, ED, ET] binary masks.
             # Mutually exclusive subregions — NCR has its own channel and gradient.
             mask = torch.from_numpy(seg_to_subregions(label))
